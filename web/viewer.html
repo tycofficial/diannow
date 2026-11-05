@@ -5,11 +5,11 @@ main,video{min-width:0;min-height:0}
 button,textarea{border-radius:0!important;box-shadow:none!important}
 header,footer,#stats{background:#1b1c1e}button,#keyboard{background:#2b2d30;border-color:#4b4d52}button[aria-pressed=true]{background:#53565c}nav{gap:4px}h1{font-weight:500}header{padding:8px 10px}#tools{gap:4px}#tools button{min-width:40px}textarea{min-height:40px}#notice{position:absolute;bottom:8px;left:12px;right:12px;pointer-events:none;text-align:center;font-size:12px;color:#eee;background:rgba(0,0,0,.72)}#notice:empty{display:none}
 #qualitybar{padding:6px 10px;background:#1b1c1e;font-size:12px;display:flex;gap:8px;flex-wrap:wrap}select{font:inherit;color:#eee;background:#2b2d30;border:1px solid #555;border-radius:0;padding:5px}#qualityhint{color:#aaa}</style></head><body>
-<header><div><h1>远程电脑</h1><div id="status" class="status" role="status">正在连接</div></div><nav><button id="audio">声音</button><button id="fullscreen">全屏</button><button id="connect">重连</button></nav></header>
-<main><video id="screen" autoplay playsinline muted aria-label="远程电脑完整桌面，支持点击和拖动"></video><div id="overlay">正在建立视频连接…</div><div id="notice" role="status"></div></main>
-<div id="qualitybar"><label>清晰度 <select id="quality"><option value="auto">自动 · 优先60帧</option><option value="2160">4K · 待检测</option><option value="1080">高清1080P · 未测</option><option value="720">720P · 未测</option></select></label> <label>帧率 <select id="framerate"><option>60</option><option>30</option><option>120</option></select> fps</label><span id="qualityhint"></span></div><div id="stats">接收 — fps · 网络往返 — ms · 视频缓冲 — ms</div>
+<header><div><h1>远程电脑</h1><div id="status" class="status" role="status">正在连接</div></div><nav><button id="audio">开启声音</button><button id="fullscreen">全屏</button><button id="connect">重连</button></nav></header>
+<main><video id="screen" autoplay playsinline muted aria-label="远程电脑完整桌面，支持点击和拖动"></video><audio id="desktopAudio" autoplay muted hidden></audio><div id="overlay">正在建立视频连接…</div><div id="notice" role="status"></div></main>
+<div id="qualitybar"><label>清晰度 <select id="quality"><option value="auto">自动 · 优先60帧</option><option value="2160">4K · 待检测</option><option value="1080">高清1080P · 未测</option><option value="720">720P · 未测</option></select></label> <label>帧率 <select id="framerate"><option>60</option><option>30</option><option>120</option></select> fps</label><span id="qualityhint"></span></div><div id="stats">接收 — fps · 网络往返 — ms · 画面缓冲 — ms</div>
 <footer><div id="tools"><button id="keyboard">键盘</button><button id="microphone">麦克风</button><button id="escape">Esc</button><button data-mod="Control" aria-pressed="false">Ctrl</button><button data-mod="Alt" aria-pressed="false">Alt</button><button data-mod="Shift" aria-pressed="false">Shift</button><button data-mod="Meta" aria-pressed="false">Win</button><button id="right">右键</button><button id="more">更多</button><button id="stop">断开</button></div>
-<div id="keyboardbox"><textarea id="typing" aria-label="远程键盘输入" placeholder="在这里打字" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><p id="inputHint">轻点点击 · 单指滑动滚动 · 长按拖动</p></div>
+<div id="keyboardbox"><div id="typingControls" style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><label>发送方式 <select id="typingMode"><option value="live">实时发送</option><option value="draft">编辑后发送</option></select></label><button id="sendTyping" hidden>发送</button></div><textarea id="typing" aria-label="远程键盘输入" maxlength="4096" placeholder="在这里打字，内容会实时发送" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><p id="inputHint">输入会立即发送 · 轻点点击 · 单指滑动滚动 · 长按拖动</p></div>
 <div id="keys"></div></footer>
 <script>
 (function(){
@@ -30,11 +30,32 @@ header,footer,#stats{background:#1b1c1e}button,#keyboard{background:#2b2d30;bord
 (function(){
 try{
 //__GESTURES__
-const video=document.getElementById('screen'),statusEl=document.getElementById('status'),overlay=document.getElementById('overlay'),statsEl=document.getElementById('stats'),typing=document.getElementById('typing');
-let pc,control,motion,sessionId,connected=false,intentional=false,connecting=false,previousStats=null,lastFrame=0,pingRtt=0,sourceFps=0,held=new Set(),pointers=new Map(),mouseDown=false,lastY=0,composing=false,lastPoint={x:.5,y:.5},pendingMove=null,autoRetry,recoveryTimer;
-let touchGestures,pendingWheel=null,remoteStream,microphoneSender,microphoneStream,microphoneReady=false,desktopAudioAvailable=false,inputId=0,moveSequence=0,noticeTimer;
+const video=document.getElementById('screen'),desktopAudio=document.getElementById('desktopAudio'),statusEl=document.getElementById('status'),overlay=document.getElementById('overlay'),statsEl=document.getElementById('stats'),typing=document.getElementById('typing');
+let pc,control,motion,sessionId,connected=false,intentional=false,connecting=false,connectionGeneration=0,previousStats=null,lastFrame=0,pingRtt=0,sourceFps=0,held=new Set(),pointers=new Map(),mouseDown=false,lastY=0,composing=false,lastPoint={x:.5,y:.5},pendingMove=null,autoRetry,recoveryTimer;
+let touchGestures,pendingWheel=null,remoteStream,remoteAudioStream,microphoneSender,microphoneStream,microphoneReady=false,desktopAudioAvailable=false,inputId=0,moveSequence=0,noticeTimer;
 const qualitySelect=document.getElementById('quality'),fpsSelect=document.getElementById('framerate');
-let activeQuality='720',sourceHeight=0,sourceRefresh=60,qualitySamples={},sampleStart=0,autoTried=false,connectionDeadline;
+let activeQuality='720',sourceHeight=0,sourceRefresh=60,qualitySamples={},sampleStart=0,autoTried=false,connectionDeadline,receiverReport=null,lastReceiverReport=0,previousAudioStats=null,previousPlayoutStats=null,previousPlaybackQuality=null,inputAckMs=null,inputAckAt=null;const pendingInputTimes=new Map();
+let audioContext=null,audioSource=null,audioGain=null,audioEnabled=false,audioOutputMode='off',audioGeneration=0,audioFallbackPreferred=false;
+function disconnectAudioGraph(){for(const node of [audioSource,audioGain]){try{node?.disconnect()}catch{}}audioSource=null;audioGain=null;audioOutputMode='off'}
+function connectAudioGraph(stream){disconnectAudioGraph();audioSource=audioContext.createMediaStreamSource(stream);audioGain=audioContext.createGain();audioGain.gain.value=0;audioSource.connect(audioGain);audioGain.connect(audioContext.destination);desktopAudio.muted=true;audioGain.gain.value=1;audioOutputMode='webaudio';document.getElementById('audio').textContent='静音'}
+function resetAudioOutput(){audioGeneration++;disconnectAudioGraph();desktopAudio.muted=true;if(intentional)audioEnabled=false;document.getElementById('audio').textContent=audioEnabled?'等待声音…':'开启声音'}
+function audioTracksReady(){return remoteAudioStream&&remoteAudioStream.getAudioTracks().some(track=>track.readyState!=='ended')}
+async function enableAudio(fromGesture){
+ const generation=++audioGeneration,stream=remoteAudioStream;const current=()=>generation===audioGeneration&&audioEnabled&&connected&&remoteAudioStream===stream;
+ desktopAudio.muted=true;document.getElementById('audio').textContent='正在开启…';
+ try{
+  if(audioFallbackPreferred)throw new Error('Use the supported audio player');
+  const AudioContextClass=window.AudioContext||window.webkitAudioContext;if(!AudioContextClass)throw new Error('Web Audio is unavailable');
+  if(!audioContext||audioContext.state==='closed'){if(!fromGesture)throw new Error('Tap to unlock audio');audioContext=new AudioContextClass({latencyHint:'interactive'})}
+  if(audioContext.state!=='running'){if(!fromGesture)throw new Error('Tap to resume audio');await audioContext.resume()}
+  if(!current())return;if(audioContext.state!=='running')throw new Error('Audio playback remains suspended');
+  connectAudioGraph(stream);return;
+ }catch{
+  if(!current())return;disconnectAudioGraph();desktopAudio.muted=false;
+  try{await desktopAudio.play();if(!current())return;audioFallbackPreferred=true;audioOutputMode='element';document.getElementById('audio').textContent='静音';notice('已开启声音，当前使用兼容播放')}
+  catch{if(!current())return;audioFallbackPreferred=false;audioEnabled=false;desktopAudio.muted=true;audioOutputMode='off';document.getElementById('audio').textContent='开启声音';notice('请再次点击开启声音，允许浏览器播放')}
+ }
+}
 function updateQualityLabels(){for(const option of qualitySelect.options){if(option.value==='auto')continue;const h=Number(option.value),v=qualitySamples[h];option.disabled=Boolean(sourceHeight&&h>sourceHeight);option.textContent=(h===2160?'4K':h===1080?'高清1080P':'720P')+' · '+(option.disabled?'源屏幕不支持':v?('平均 '+(v.total/v.seconds).toFixed(1)+' fps'):'未测');}for(const option of fpsSelect.options)option.disabled=Number(option.value)>sourceRefresh;}
 function applyQuality(){activeQuality=qualitySelect.value==='auto'?'720':qualitySelect.value;autoTried=false;sampleStart=Date.now();send({type:'settings',quality:activeQuality,fps:Number(fpsSelect.value)});document.getElementById('qualityhint').textContent=qualitySelect.value==='auto'?'优先60帧，稳定后尝试更高清晰度':'';}
 qualitySelect.onchange=applyQuality;fpsSelect.onchange=()=>{if(qualitySelect.value==='auto')qualitySelect.value=activeQuality;applyQuality()};
@@ -43,26 +64,27 @@ function notice(message){document.getElementById('notice').textContent=message;c
 const iceServers=[{urls:'stun:stun.cloudflare.com:3478'}];
 const signalingOrigin=location.hostname.endsWith('.github.io')?'https://desktop-live-tianw-1105.tyc130923.chatgpt.site':'';
 async function api(path,options={}){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);try{return await fetch(signalingOrigin+path,{...options,signal:controller.signal,credentials:'omit',referrerPolicy:'no-referrer'})}finally{clearTimeout(timer)}}
-function send(event,fast=false){const channel=fast?motion:control;if(event.type==='move')event.seq=++moveSequence;if(['key','text'].includes(event.type))event.id=++inputId;if(channel&&channel.readyState==='open'&&channel.bufferedAmount<65536){channel.send(JSON.stringify(event));return true}return false}
+function send(event,fast=false){const channel=fast?motion:control;if(event.type==='move')event.seq=++moveSequence;if(['key','text','button','wheel'].includes(event.type))event.id=++inputId;if(channel&&channel.readyState==='open'&&channel.bufferedAmount<65536){try{channel.send(JSON.stringify(event));if(event.id){pendingInputTimes.set(event.id,performance.now());if(pendingInputTimes.size>512)pendingInputTimes.delete(pendingInputTimes.keys().next().value)}return true}catch{return false}}return false}
 function release(){touchGestures?.cancel();if(mouseDown){send({type:'button',button:0,down:false});mouseDown=false}pointers.clear();pendingMove=null;pendingWheel=null;send({type:'release'})}
 function clearModifiers(){held.clear();document.querySelectorAll('[data-mod]').forEach(button=>button.setAttribute('aria-pressed','false'))}
 function key(name,modifiers=name==='Escape'?[]:[...held]){if(!send({type:'key',key:name,modifiers}))notice('输入通道尚未连接');clearModifiers()}
 function text(value){if([...held].some(mod=>['Control','Alt','Meta'].includes(mod))&&/^[a-z0-9]+$/i.test(value)){for(const char of value)key(char)}else send({type:'text',text:held.has('Shift')?value.replace(/[a-z]/g,char=>char.toUpperCase()):value})}
-async function closeConnection(){clearTimeout(connectionDeadline);clearTimeout(recoveryTimer);release();connected=false;if(microphoneStream){microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null}document.getElementById('microphone').setAttribute('aria-pressed','false');if(pc){const old=pc;pc=null;await old.close()}video.srcObject=null;remoteStream=null;previousStats=null}
-function bindChannel(channel){channel.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==='pong'){pingRtt=performance.now()-value.time;sourceFps=value.fps;sourceHeight=value.source?.height||sourceHeight;sourceRefresh=value.source?.refresh||60;updateQualityLabels();microphoneReady=Boolean(value.microphoneReady);desktopAudioAvailable=Boolean(value.audio);if(value.inputError)notice(value.inputError)}else if(value.type==='inputAck'&&value.error)notice(value.error)}catch{}}}
+async function closeConnection(){clearTimeout(connectionDeadline);clearTimeout(recoveryTimer);release();connected=false;resetAudioOutput();if(microphoneStream){microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null}document.getElementById('microphone').setAttribute('aria-pressed','false');video.srcObject=null;desktopAudio.srcObject=null;for(const stream of [remoteStream,remoteAudioStream])stream?.getTracks().forEach(track=>track.stop());remoteStream=null;remoteAudioStream=null;desktopAudioAvailable=false;previousStats=null;previousAudioStats=null;previousPlayoutStats=null;previousPlaybackQuality=null;pendingInputTimes.clear();inputAckMs=null;inputAckAt=null;receiverReport=null;lastReceiverReport=0;sourceFps=0;if(pc){const old=pc;pc=null;await old.close()}}
+function bindChannel(channel){channel.onmessage=event=>{if(channel!==control&&channel!==motion)return;try{const value=JSON.parse(event.data);if(value.type==='pong'){pingRtt=performance.now()-value.time;sourceFps=value.fps;sourceHeight=value.source?.height||sourceHeight;sourceRefresh=value.source?.refresh||60;updateQualityLabels();microphoneReady=Boolean(value.microphoneReady);desktopAudioAvailable=Boolean(value.audio);if(value.inputError)notice(value.inputError)}else if(value.type==='inputAck'){const sentAt=pendingInputTimes.get(value.id);if(sentAt!==undefined){inputAckAt=performance.now();inputAckMs=Math.max(0,inputAckAt-sentAt);pendingInputTimes.delete(value.id)}typingAck(value);if(value.error)notice(value.error)}}catch{}}}
 async function connect(){
  if(connecting)return;connecting=true;intentional=false;clearTimeout(autoRetry);
+ const generation=++connectionGeneration;let active;const current=()=>generation===connectionGeneration&&!intentional&&(!active||pc===active);
  try{
-  await closeConnection();window.desktopBoot.stage('connecting');overlay.textContent='正在建立加密视频连接…';statusEl.textContent='正在连接电脑…';
+  await closeConnection();if(!current())return;window.desktopBoot.stage('connecting');overlay.textContent='正在建立加密视频连接…';statusEl.textContent='正在连接电脑…';
   if(typeof RTCPeerConnection!=='function')throw new Error('当前浏览器没有提供实时桌面所需的视频连接功能');
-  pc=new RTCPeerConnection({iceServers,bundlePolicy:'max-bundle'});const active=pc;connectionDeadline=setTimeout(()=>{if(pc===active&&!connected&&!intentional){connecting=false;closeConnection();statusEl.textContent='连接超时，正在重试';autoRetry=setTimeout(connect,3000)}},30000);
+  pc=new RTCPeerConnection({iceServers,bundlePolicy:'max-bundle'});active=pc;connectionDeadline=setTimeout(()=>{if(current()&&!connected){connectionGeneration++;connecting=false;closeConnection();statusEl.textContent='连接超时，正在重试';autoRetry=setTimeout(connect,3000)}},30000);
   control=pc.createDataChannel('input',{ordered:true});motion=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});bindChannel(control);bindChannel(motion);
   pc.addTransceiver('video',{direction:'recvonly'});
-  microphoneSender=pc.addTransceiver('audio',{direction:'sendrecv'}).sender;remoteStream=new MediaStream();video.srcObject=remoteStream;
-  pc.ontrack=event=>{remoteStream.addTrack(event.track);video.play().catch(()=>{});try{event.receiver.jitterBufferTarget=event.track.kind==='video'?60:40}catch{};try{event.receiver.playoutDelayHint=.05}catch{}};
+  microphoneSender=pc.addTransceiver('audio',{direction:'sendrecv'}).sender;remoteStream=new MediaStream();remoteAudioStream=new MediaStream();video.srcObject=remoteStream;desktopAudio.srcObject=remoteAudioStream;
+  pc.ontrack=event=>{if(!current())return;for(const hint of ['jitterBufferTarget','playoutDelayHint']){try{if(hint in event.receiver)event.receiver[hint]=0}catch{}}if(event.track.kind==='video'){try{if('contentHint' in event.track)event.track.contentHint='detail'}catch{};remoteStream.addTrack(event.track);video.play().catch(()=>{})}else if(event.track.kind==='audio'){remoteAudioStream.addTrack(event.track);if(audioEnabled)enableAudio(false)}};
   pc.onconnectionstatechange=()=>{
-   if(pc!==active)return;const state=active.connectionState;connected=state==='connected';
-   if(connected){window.desktopBoot.stage('connected');clearTimeout(connectionDeadline);sampleStart=Date.now();clearTimeout(recoveryTimer);clearTimeout(autoRetry);lastFrame=Date.now();statusEl.textContent='已连接 · 原始分辨率';overlay.textContent='';connecting=false;send({type:'release'})}
+   if(!current())return;const state=active.connectionState;connected=state==='connected';
+   if(connected){window.desktopBoot.stage('connected');clearTimeout(connectionDeadline);sampleStart=Date.now();clearTimeout(recoveryTimer);clearTimeout(autoRetry);lastFrame=Date.now();statusEl.textContent='已连接 · 原始分辨率';overlay.textContent='';connecting=false;send({type:'release'});if(audioEnabled&&audioTracksReady())enableAudio(false)}
    else if(state==='disconnected'){
     release();statusEl.textContent='网络短时波动，正在恢复';
     clearTimeout(recoveryTimer);recoveryTimer=setTimeout(()=>{if(pc===active&&active.connectionState==='disconnected'&&!intentional){connecting=false;connect()}},12000);
@@ -71,26 +93,31 @@ async function connect(){
     if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,3000)}
    }
   };
-  await pc.setLocalDescription(await pc.createOffer());
+  const localOffer=await active.createOffer();if(!current())return;await active.setLocalDescription(localOffer);if(!current())return;
   window.desktopBoot.stage('offer-created');
   await Promise.race([new Promise(resolve=>{if(active.iceGatheringState==='complete')resolve();else active.addEventListener('icegatheringstatechange',()=>{if(active.iceGatheringState==='complete')resolve()})}),new Promise(resolve=>setTimeout(resolve,5000))]);
+  if(!current())return;
   const offer=active.localDescription;
   const response=await api('/api/offer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sdp:offer.sdp,type:offer.type,preferences:{quality:qualitySelect.value==='auto'?'720':qualitySelect.value,fps:Number(fpsSelect.value)}})});
+  if(!current())return;
   if(!response.ok)throw new Error('建立连接失败：HTTP '+response.status);
   const result=await response.json();
+  if(!current())return;
   window.desktopBoot.stage('offer-sent');
-  if(result.sdp){await active.setRemoteDescription(result)}else{
-   sessionId=result.id;const deadline=Date.now()+45000;let answered=false;
-   while(Date.now()<deadline&&pc===active&&!intentional){
-    const reply=await api('/api/answer/'+sessionId,{cache:'no-store'});
-    if(reply.status===200){await active.setRemoteDescription(await reply.json());window.desktopBoot.stage('answer-received');answered=true;break}
+  if(result.sdp){await active.setRemoteDescription(result);if(!current())return}else{
+   const pendingId=result.id;sessionId=pendingId;const deadline=Date.now()+45000;let answered=false;
+   while(Date.now()<deadline&&current()){
+    const reply=await api('/api/answer/'+pendingId,{cache:'no-store'});
+    if(!current())return;
+    if(reply.status===200){const answer=await reply.json();if(!current())return;await active.setRemoteDescription(answer);if(!current())return;window.desktopBoot.stage('answer-received');answered=true;break}
     if(![204,404].includes(reply.status))throw new Error('电脑连接失败：HTTP '+reply.status);
     await new Promise(resolve=>setTimeout(resolve,350));
    }
+   if(!current())return;
    if(!answered)throw new Error('电脑端未响应，请确认连接程序正在运行');
   }
-  setTimeout(()=>{if(pc===active&&!connected&&!intentional){overlay.textContent='网络直连尚未成功。可重试；受限网络需要中继服务。';statusEl.textContent='网络连接超时，正在重试';connecting=false;autoRetry=setTimeout(connect,3000)}},18000);
- }catch(error){window.desktopBoot.stage('connection-error',error.message);statusEl.textContent='连接失败，正在重试';overlay.textContent=error.message;connecting=false;if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,5000)}}
+  setTimeout(()=>{if(current()&&!connected){overlay.textContent='网络直连尚未成功。可重试；受限网络需要中继服务。';statusEl.textContent='网络连接超时，正在重试';connecting=false;autoRetry=setTimeout(connect,3000)}},18000);
+ }catch(error){if(!current())return;window.desktopBoot.stage('connection-error',error.message);statusEl.textContent='连接失败，正在重试';overlay.textContent=error.message;connecting=false;if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,5000)}}
 }
 function point(event){const bounds=video.getBoundingClientRect(),vw=video.videoWidth||1280,vh=video.videoHeight||720,scale=Math.min(bounds.width/vw,bounds.height/vh),w=vw*scale,h=vh*scale;return{x:Math.max(0,Math.min(1,(event.clientX-bounds.left-(bounds.width-w)/2)/w)),y:Math.max(0,Math.min(1,(event.clientY-bounds.top-(bounds.height-h)/2)/h))}}
 touchGestures=new TouchGestures({point,emit:event=>{if(event.type==='wheel'){pendingWheel={...event,delta:Math.max(-1200,Math.min(1200,(pendingWheel?.delta||0)+event.delta))}}else send(event)}});
@@ -100,10 +127,27 @@ video.onpointerup=event=>{if(event.pointerType==='touch'){touchGestures.up(event
 function moveLoop(){if(pendingMove){send(pendingMove,true);pendingMove=null}if(pendingWheel){send(pendingWheel);pendingWheel=null}requestAnimationFrame(moveLoop)}moveLoop();
 window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release()});
 document.getElementById('keyboard').onclick=()=>{const open=document.getElementById('keyboardbox').classList.toggle('open');document.getElementById('keyboard').textContent=open?'收起键盘':'打开键盘';if(open)typing.focus();else typing.blur()};
-typing.addEventListener('compositionstart',()=>composing=true);typing.addEventListener('compositionend',event=>{composing=false;if(event.data)text(event.data);typing.value=''});
-typing.addEventListener('input',event=>{if(composing||event.isComposing)return;if(typing.value)text(typing.value);typing.value=''});
-typing.addEventListener('beforeinput',event=>{if(!composing&&event.inputType.startsWith('delete')){event.preventDefault();key(event.inputType.includes('Forward')?'Delete':'Backspace')}});
+const typingMode=document.getElementById('typingMode'),sendTyping=document.getElementById('sendTyping');let manualDraft='',pendingTyping=null;
+function updateTypingMode(){const draft=typingMode.value==='draft';sendTyping.hidden=!draft;typing.placeholder=draft?'在这里编辑或语音输入，完成后点击发送':'在这里打字，内容会实时发送';document.getElementById('inputHint').textContent=draft?'草稿保留在输入框 · 支持换行 · 点击发送或 Ctrl+Enter · 最多4096字':'输入会立即发送 · 轻点点击 · 单指滑动滚动 · 长按拖动'}
+typingMode.onchange=()=>{if(typingMode.value==='live'){manualDraft=typing.value;typing.value=''}else typing.value=manualDraft;composing=false;updateTypingMode()};
+function finishTyping(){if(!pendingTyping)return;clearTimeout(pendingTyping.timer);pendingTyping=null;sendTyping.disabled=false;sendTyping.textContent='发送';typing.readOnly=false;typingMode.disabled=false}
+function typingAck(value){if(!pendingTyping||value.id!==pendingTyping.id)return;if(!value.error){if(typing.value===pendingTyping.text)typing.value='';manualDraft=typing.value;notice('已发送')}finishTyping()}
+function submitTyping(){
+ if(typingMode.value!=='draft'||pendingTyping)return;
+ if(composing){notice('请先结束语音输入或文字选词，再点击发送');return}
+ const value=typing.value;if(!value)return;if(value.length>4096){notice('内容超过4096字，请缩短后发送');return}
+ if(!connected){notice('尚未连接电脑，草稿已保留');return}
+ const event={type:'text',text:value};let sent=false;try{sent=send(event)}catch{}
+ if(!sent){notice('发送失败，草稿已保留，请稍后重试');return}
+ pendingTyping={id:event.id,text:value,timer:setTimeout(()=>{finishTyping();notice('未收到发送确认，草稿已保留，请检查电脑后再重试')},10000)};
+ sendTyping.disabled=true;sendTyping.textContent='正在发送…';typing.readOnly=true;typingMode.disabled=true;
+}
+sendTyping.onclick=submitTyping;updateTypingMode();
+typing.addEventListener('compositionstart',()=>composing=true);typing.addEventListener('compositionend',event=>{composing=false;if(typingMode.value==='draft'){manualDraft=typing.value;return}if(event.data)text(event.data);typing.value=''});
+typing.addEventListener('input',event=>{if(typingMode.value==='draft'){manualDraft=typing.value;return}if(composing||event.isComposing)return;if(typing.value)text(typing.value);typing.value=''});
+typing.addEventListener('beforeinput',event=>{if(typingMode.value==='draft')return;if(!composing&&event.inputType.startsWith('delete')){event.preventDefault();key(event.inputType.includes('Forward')?'Delete':'Backspace')}});
 typing.addEventListener('keydown',event=>{
+ if(typingMode.value==='draft'){if(!composing&&!event.isComposing&&event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();submitTyping()}return}
  if(composing||event.isComposing)return;
  if(['Enter','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.key)){
   event.preventDefault();key(event.key);
@@ -121,16 +165,22 @@ for(const [label,name,modifiers] of [['全选','a',['Control']],['复制','c',['
 document.getElementById('more').onclick=()=>document.getElementById('keys').classList.toggle('open');
 document.getElementById('right').onclick=()=>{send({type:'move',...lastPoint});send({type:'button',button:2,down:true});send({type:'button',button:2,down:false})};
 document.getElementById('escape').onclick=()=>key('Escape',[]);
-document.getElementById('audio').onclick=async()=>{if(!connected){notice('请等待电脑连接');return}if(!desktopAudioAvailable){notice('电脑声音通道尚未就绪');return}video.muted=!video.muted;try{await video.play();document.getElementById('audio').textContent=video.muted?'声音':'静音'}catch{video.muted=true;notice('请再次点击声音开启播放')}};
+document.getElementById('audio').onclick=async()=>{if(audioEnabled){audioEnabled=false;audioGeneration++;disconnectAudioGraph();desktopAudio.muted=true;document.getElementById('audio').textContent='开启声音';return}if(!connected){notice('请等待电脑连接');return}if(!desktopAudioAvailable||!audioTracksReady()){notice('电脑声音通道尚未就绪');return}audioEnabled=true;await enableAudio(true)};
 document.getElementById('microphone').onclick=async()=>{if(microphoneStream){await microphoneSender.replaceTrack(null);microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null;document.getElementById('microphone').setAttribute('aria-pressed','false');return}if(!connected){notice('请等待电脑连接');return}if(!microphoneReady){notice('电脑尚未配置虚拟麦克风，暂时无法送入 Codex');return}try{microphoneStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});await microphoneSender.replaceTrack(microphoneStream.getAudioTracks()[0]);document.getElementById('microphone').setAttribute('aria-pressed','true')}catch(error){notice('麦克风未开启：'+error.message)}};
 document.getElementById('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.body.requestFullscreen()}catch{statusEl.textContent='可将手机横屏放大'}};
-document.getElementById('connect').onclick=connect;document.getElementById('stop').onclick=async()=>{intentional=true;clearTimeout(autoRetry);send({type:'disconnect'});await closeConnection();connecting=false;overlay.textContent='连接已断开';statusEl.textContent='已断开 · 重新连接可恢复'};
+document.getElementById('connect').onclick=connect;document.getElementById('stop').onclick=async()=>{intentional=true;connectionGeneration++;clearTimeout(autoRetry);send({type:'disconnect'});await closeConnection();connecting=false;overlay.textContent='连接已断开';statusEl.textContent='已断开 · 重新连接可恢复'};
 setInterval(async()=>{
- if(!pc||!connected)return;send({type:'ping',time:performance.now()},true);
- try{const report=await pc.getStats();let inbound,pair;report.forEach(value=>{if(value.type==='inbound-rtp'&&value.kind==='video')inbound=value;if(value.type==='candidate-pair'&&value.state==='succeeded'&&value.nominated)pair=value});if(lastFrame&&Date.now()-lastFrame>15000&&!document.hidden){connecting=false;connect();return}if(!inbound)return;
-  if(previousStats){const elapsed=(inbound.timestamp-previousStats.timestamp)/1000,frames=(inbound.framesDecoded-previousStats.framesDecoded)/elapsed;const emitted=(inbound.jitterBufferEmittedCount||0)-(previousStats.jitterBufferEmittedCount||0),buffer=emitted>0?1000*((inbound.jitterBufferDelay||0)-(previousStats.jitterBufferDelay||0))/emitted:0;const rtt=pair&&pair.currentRoundTripTime?pair.currentRoundTripTime*1000:pingRtt;const mbps=8*(inbound.bytesReceived-previousStats.bytesReceived)/elapsed/1e6;
-   recordQuality(frames,elapsed);statsEl.textContent=(video.videoWidth?video.videoWidth+' × '+video.videoHeight+' · ':'')+'接收 '+Math.max(0,frames).toFixed(0)+' fps · 往返 '+rtt.toFixed(0)+' ms · 缓冲 '+buffer.toFixed(0)+' ms · '+mbps.toFixed(1)+' Mbps';if(frames>0){lastFrame=Date.now();overlay.textContent=''}if(lastFrame&&Date.now()-lastFrame>7000){overlay.textContent='视频暂时中断，正在恢复…'}
-  }previousStats=inbound;
+ if(!pc||!connected)return;const ping={type:'ping',time:performance.now()},reportTime=Date.now();if(receiverReport&&reportTime-lastReceiverReport>=5000)ping.receiverReport=receiverReport;if(send(ping,true)&&ping.receiverReport)lastReceiverReport=reportTime;
+ try{const statsPeer=pc,report=await statsPeer.getStats();if(pc!==statsPeer||!connected)return;let inbound,audioInbound,audioPlayout,pair;report.forEach(value=>{const kind=value.kind||value.mediaType;if(value.type==='inbound-rtp'&&kind==='video')inbound=value;if(value.type==='inbound-rtp'&&kind==='audio')audioInbound=value;if(value.type==='media-playout'&&kind==='audio')audioPlayout=value;if(value.type==='candidate-pair'&&value.state==='succeeded'&&value.nominated)pair=value});if(lastFrame&&Date.now()-lastFrame>15000&&!document.hidden){connecting=false;connect();return}if(!inbound)return;let playbackQuality=null;try{if(typeof video.getVideoPlaybackQuality==='function'){const quality=video.getVideoPlaybackQuality();playbackQuality={totalVideoFrames:quality.totalVideoFrames,droppedVideoFrames:quality.droppedVideoFrames}}}catch{}
+  if(previousStats){
+   const rounded=value=>Number.isFinite(value)&&value>=0?Math.round(value*100)/100:null;const sameStream=(current,previous)=>current&&previous&&!(current.id!==undefined&&previous.id!==undefined&&current.id!==previous.id)&&!(current.ssrc!==undefined&&previous.ssrc!==undefined&&current.ssrc!==previous.ssrc);const delta=(current,previous,name)=>{if(!sameStream(current,previous))return null;const change=current[name]-previous[name];return Number.isFinite(current[name])&&Number.isFinite(previous[name])&&change>=0?change:null};
+   const elapsed=sameStream(inbound,previousStats)&&Number.isFinite(inbound.timestamp)&&Number.isFinite(previousStats.timestamp)?(inbound.timestamp-previousStats.timestamp)/1000:null,validInterval=elapsed!==null&&elapsed>0;
+   const decoded=validInterval?delta(inbound,previousStats,'framesDecoded'):null,frames=decoded!==null?decoded/elapsed:null,emitted=validInterval?delta(inbound,previousStats,'jitterBufferEmittedCount'):null,delay=validInterval?delta(inbound,previousStats,'jitterBufferDelay'):null,buffer=emitted>0&&delay!==null?1000*delay/emitted:null;
+   const rtt=Number.isFinite(pair?.currentRoundTripTime)&&pair.currentRoundTripTime>0?pair.currentRoundTripTime*1000:pingRtt,received=validInterval?delta(inbound,previousStats,'bytesReceived'):null,mbps=received!==null?8*received/elapsed/1e6:null,lost=validInterval?delta(inbound,previousStats,'packetsLost'):null,decodeTime=validInterval?delta(inbound,previousStats,'totalDecodeTime'):null;
+   const audioEmitted=delta(audioInbound,previousAudioStats,'jitterBufferEmittedCount'),audioDelay=delta(audioInbound,previousAudioStats,'jitterBufferDelay'),playoutCount=delta(audioPlayout,previousPlayoutStats,'totalSamplesCount'),playoutDelay=delta(audioPlayout,previousPlayoutStats,'totalPlayoutDelay');
+   receiverReport={fps:rounded(frames),bufferMs:rounded(buffer),lossDelta:rounded(lost),decodeMs:decoded>0&&decodeTime!==null?rounded(1000*decodeTime/decoded):null,mbps:rounded(mbps),inputAckMs:rounded(inputAckMs),inputAckAgeMs:inputAckAt!==null?rounded(performance.now()-inputAckAt):null,audioBufferMs:audioEmitted>0&&audioDelay!==null?rounded(1000*audioDelay/audioEmitted):null,audioTotalSamplesDuration:rounded(audioInbound?.totalSamplesDuration),audioTotalSamplesReceived:rounded(audioInbound?.totalSamplesReceived),audioConcealedSamplesDelta:delta(audioInbound,previousAudioStats,'concealedSamples'),audioPlayoutSamplesDuration:rounded(audioPlayout?.totalSamplesDuration),audioTotalPlayoutDelay:rounded(audioPlayout?.totalPlayoutDelay),audioTotalSamplesCount:rounded(audioPlayout?.totalSamplesCount),audioPlayoutMs:playoutCount>0&&playoutDelay!==null?rounded(1000*playoutDelay/playoutCount):null,audioBaseLatencyMs:audioOutputMode==='webaudio'&&Number.isFinite(audioContext?.baseLatency)?rounded(audioContext.baseLatency*1000):null,audioOutputLatencyMs:audioOutputMode==='webaudio'&&Number.isFinite(audioContext?.outputLatency)?rounded(audioContext.outputLatency*1000):null,videoDecodedDelta:decoded,videoDroppedDelta:validInterval?delta(inbound,previousStats,'framesDropped'):null,playbackFramesDelta:delta(playbackQuality,previousPlaybackQuality,'totalVideoFrames'),playbackDroppedDelta:delta(playbackQuality,previousPlaybackQuality,'droppedVideoFrames')};
+   if(frames!==null)recordQuality(frames,elapsed);statsEl.textContent=(video.videoWidth?video.videoWidth+' × '+video.videoHeight+' · ':'')+'接收 '+(frames===null?'—':frames.toFixed(0))+' fps · 发送 '+(sourceFps>0?sourceFps.toFixed(0):'—')+' fps · 往返 '+rtt.toFixed(0)+' ms · 画面缓冲 '+(buffer===null?'—':buffer.toFixed(0))+' ms'+(receiverReport.audioBufferMs!==null?' · 声音缓冲 '+receiverReport.audioBufferMs.toFixed(0)+' ms':'')+' · '+(mbps===null?'—':mbps.toFixed(1))+' Mbps';if(frames>0){lastFrame=Date.now();overlay.textContent=''}if(lastFrame&&Date.now()-lastFrame>7000){overlay.textContent='视频暂时中断，正在恢复…'}
+  }previousStats=inbound;previousAudioStats=audioInbound||null;previousPlayoutStats=audioPlayout||null;previousPlaybackQuality=playbackQuality;
  }catch{}
 },1000);
 window.desktopBoot.stage('ready');connect();

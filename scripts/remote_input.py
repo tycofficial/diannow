@@ -20,16 +20,55 @@ user32.VkKeyScanW.restype=ctypes.c_short
 user32.WindowFromPoint.argtypes=[POINT];user32.WindowFromPoint.restype=wintypes.HWND
 user32.GetAncestor.argtypes=[wintypes.HWND,wintypes.UINT];user32.GetAncestor.restype=wintypes.HWND
 user32.SetForegroundWindow.argtypes=[wintypes.HWND];user32.SetForegroundWindow.restype=wintypes.BOOL
+user32.GetForegroundWindow.restype=wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
 KEYS={'Backspace':8,'Tab':9,'Enter':13,'Shift':16,'Control':17,'Alt':18,'Pause':19,'CapsLock':20,'Escape':27,'Space':32,'PageUp':33,'PageDown':34,'End':35,'Home':36,'ArrowLeft':37,'ArrowUp':38,'ArrowRight':39,'ArrowDown':40,'Insert':45,'Delete':46,'Meta':91}
 KEYS.update({'F'+str(i):111+i for i in range(1,13)})
 KEYS.update({chr(i):i for i in range(65,91)})
 KEYS.update({str(i):48+i for i in range(10)})
 
+def process_integrity(pid):
+    """Read a process's integrity without changing its token or permissions."""
+    kernel32=ctypes.WinDLL('kernel32',use_last_error=True);advapi32=ctypes.WinDLL('advapi32',use_last_error=True)
+    kernel32.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD];kernel32.OpenProcess.restype=wintypes.HANDLE
+    kernel32.CloseHandle.argtypes=[wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes=[wintypes.HANDLE,wintypes.DWORD,ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD)]
+    advapi32.GetSidSubAuthorityCount.argtypes=[ctypes.c_void_p];advapi32.GetSidSubAuthorityCount.restype=ctypes.POINTER(ctypes.c_ubyte)
+    advapi32.GetSidSubAuthority.argtypes=[ctypes.c_void_p,wintypes.DWORD];advapi32.GetSidSubAuthority.restype=ctypes.POINTER(wintypes.DWORD)
+    process=kernel32.OpenProcess(0x1000,False,pid);token=wintypes.HANDLE()
+    if not process:return None
+    try:
+        if not advapi32.OpenProcessToken(process,8,ctypes.byref(token)):return None
+        length=wintypes.DWORD();advapi32.GetTokenInformation(token,25,None,0,ctypes.byref(length))
+        if not length.value:return None
+        buffer=ctypes.create_string_buffer(length.value)
+        if not advapi32.GetTokenInformation(token,25,buffer,len(buffer),ctypes.byref(length)):return None
+        sid=ctypes.cast(buffer,ctypes.POINTER(ctypes.c_void_p))[0]
+        count=advapi32.GetSidSubAuthorityCount(sid)[0]
+        return advapi32.GetSidSubAuthority(sid,count-1)[0]
+    finally:
+        if token:kernel32.CloseHandle(token)
+        kernel32.CloseHandle(process)
+
+def input_failure(accepted,total,error):
+    message=f'Windows accepted {accepted}/{total} remote input events (Win32 error {error}).'
+    try:
+        import os
+        foreground=wintypes.DWORD();user32.GetWindowThreadProcessId(user32.GetForegroundWindow(),ctypes.byref(foreground))
+        own_level=process_integrity(os.getpid());target_level=process_integrity(foreground.value)
+        if own_level is not None and target_level is not None and target_level>own_level:
+            message+=' The foreground program has higher Windows privileges than the desktop agent.'
+    except Exception:pass
+    return message
+
 def emit(inputs):
     if inputs:
         batch=(INPUT*len(inputs))(*inputs)
-        if user32.SendInput(len(batch),batch,ctypes.sizeof(INPUT)) != len(batch):
-            raise OSError('Windows did not accept remote input for this desktop.')
+        ctypes.set_last_error(0)
+        accepted=user32.SendInput(len(batch),batch,ctypes.sizeof(INPUT))
+        error=ctypes.get_last_error()
+        if accepted != len(batch):raise OSError(input_failure(accepted,len(batch),error))
 def key(vk,up=False):
     scan=user32.MapVirtualKeyW(vk,4)
     extended=(scan&0xff00) in [0xe000,0xe100] or vk in [33,34,35,36,37,38,39,40,45,46,91,92,111]
@@ -60,7 +99,11 @@ class RemoteInput:
         while self.running:
             event,on_result=self.events.get()
             try:
-                if self.enabled:self.apply(event);self.error=None
+                if not self.enabled:raise OSError('The desktop input channel is not connected.')
+                self.apply(event)
+                # Pointer movement and an empty release do not prove that the
+                # user's failed click or key reached its target program.
+                if event.get('type') in ['button','wheel','key','text']:self.error=None
                 if on_result and event.get('id'):on_result(event['id'],None)
             except Exception as error:
                 self.error=str(error)
@@ -102,9 +145,14 @@ class RemoteInput:
                     vk=mapped&255;bits=(mapped>>8)&255
                     if text.isalpha() and user32.GetKeyState(20)&1:bits^=1
                     self.tap(vk,[value for mask,value in [(1,16),(2,17),(4,18)] if bits&mask]);return
-            units=text.encode('utf-16-le');inputs=[]
+            # Unicode LF produces VK_PACKET rather than the Enter key that
+            # Windows edit controls expect. Normalize line endings and keep
+            # the whole text submission in one SendInput batch.
+            units=text.replace('\r\n','\n').replace('\r','\n').encode('utf-16-le');inputs=[]
             for offset in range(0,len(units),2):
                 code=int.from_bytes(units[offset:offset+2],'little')
+                if code==10:
+                    inputs.extend([key(KEYS['Enter']),key(KEYS['Enter'],True)]);continue
                 inputs.extend([INPUT(type=1,ki=KEYBDINPUT(wScan=code,dwFlags=4)),INPUT(type=1,ki=KEYBDINPUT(wScan=code,dwFlags=6))])
             emit(inputs)
         elif kind=='key':

@@ -3,6 +3,24 @@ import asyncio, fractions, queue,time
 import av, numpy as np
 import pyaudiowpatch as pyaudio
 from aiortc import MediaStreamTrack
+from aiortc.codecs.opus import OpusEncoder
+
+class TimelineOpusEncoder(OpusEncoder):
+    """Keep a capture gap from generating an extra stale RTP timestamp."""
+    def __init__(self):
+        super().__init__();self.expected_time=None
+    def encode(self,frame,force_keyframe=False):
+        frame_time=frame.pts*frame.time_base if frame.pts is not None and frame.time_base is not None else None
+        if frame_time is not None and self.expected_time is not None and abs(frame_time-self.expected_time)>fractions.Fraction(1,frame.sample_rate):
+            # libopus retains its lookahead across an input-PTS jump. Without
+            # a reset it stamps the first fresh packet with the old expected
+            # PTS and only jumps on the next packet, adding two large jitter
+            # spikes. Preserve the RTP origin while dropping stale lookahead.
+            origin=self.first_packet_pts
+            OpusEncoder.__init__(self)
+            self.first_packet_pts=origin
+        self.expected_time=frame_time+fractions.Fraction(frame.samples,frame.sample_rate) if frame_time is not None else None
+        return super().encode(frame,force_keyframe)
 
 class DesktopAudioTrack(MediaStreamTrack):
     kind='audio'
@@ -19,9 +37,17 @@ class DesktopAudioTrack(MediaStreamTrack):
             return (None,pyaudio.paContinue)
         self.stream=self.audio.open(format=pyaudio.paInt16,channels=self.channels,rate=self.rate,input=True,input_device_index=int(self.device['index']),frames_per_buffer=self.samples,stream_callback=callback)
     async def recv(self):
-        self.started=self.started or time.perf_counter()
+        if self.started is None:self.started=time.perf_counter()
         pause=self.started+self.timestamp/self.rate-time.perf_counter()
         if pause>0:await asyncio.sleep(pause)
+        # After a busy event loop resumes, send current audio instead of
+        # rapidly synthesizing all the missed 20 ms frames to catch up.
+        late_samples=int(max(0,time.perf_counter()-self.started-self.timestamp/self.rate)*self.rate)
+        if late_samples>=self.samples*2:
+            self.timestamp+=(late_samples//self.samples)*self.samples
+            while self.frames.qsize()>1:
+                try:self.frames.get_nowait()
+                except queue.Empty:break
         try:data=self.frames.get_nowait()
         except queue.Empty:data=bytes(self.samples*self.channels*2)
         samples=np.frombuffer(data,dtype=np.int16).reshape(1,-1)

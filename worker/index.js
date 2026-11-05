@@ -13,6 +13,26 @@ async function matchesHash(value, expected) {
 
 async function storageRead(bucket,key){for(let attempt=0;;attempt++){try{return await bucket.get(key)}catch(error){if(attempt>=2)throw error;await new Promise(resolve=>setTimeout(resolve,150*(attempt+1)));}}}
 
+async function readPending(bucket,key,now){
+  const object=await storageRead(bucket,key);if(!object)return null;
+  const pending=await object.json();
+  if(!idPattern.test(pending.id)||!Number.isFinite(pending.createdAt)||now-pending.createdAt>=60000||await storageRead(bucket,'rtc/answer/'+pending.id)){
+    await bucket.delete(key);return null;
+  }
+  return pending;
+}
+
+async function nextPending(bucket){
+  const now=Date.now();let cursor;
+  do{
+    const page=await bucket.list({prefix:'rtc/pending/',limit:32,...(cursor?{cursor}:{})});
+    for(const object of page.objects){const pending=await readPending(bucket,object.key,now);if(pending)return pending;}
+    cursor=page.truncated?page.cursor:undefined;
+  }while(cursor);
+  // Keep already-open pages compatible while clearing the old completed slot.
+  return await readPending(bucket,'rtc/pending',now)||{};
+}
+
 export default {
   async fetch(request, env) {
     const url=new URL(request.url),path=url.pathname,origin=request.headers.get('origin');
@@ -41,12 +61,11 @@ export default {
       let offer;try{offer=await request.json()}catch{return json({error:'Invalid offer'},400)}
       if(offer.type!=='offer'||typeof offer.sdp!=='string'||offer.sdp.length>100000)return json({error:'Invalid offer'},400);
       const id=crypto.randomUUID(),createdAt=Date.now();
-      await env.BUCKET.put('rtc/pending',JSON.stringify({id,offer,createdAt}),{httpMetadata:{contentType:'application/json'}});
+      await env.BUCKET.put('rtc/pending/'+id,JSON.stringify({id,offer,createdAt}),{httpMetadata:{contentType:'application/json'}});
       return json({id});
     }
     if(path==='/api/agent/poll'&&request.method==='GET'){
-      const object=await storageRead(env.BUCKET,'rtc/pending');if(!object)return json({});
-      const pending=await object.json();return json(Date.now()-pending.createdAt<60000?pending:{});
+      return json(await nextPending(env.BUCKET));
     }
     if(path.startsWith('/api/answer/')){
       const id=path.slice('/api/answer/'.length);if(!idPattern.test(id))return json({error:'Invalid session'},400);
@@ -54,7 +73,11 @@ export default {
         if(Number(request.headers.get('content-length'))>100000)return json({error:'Answer is too large.'},413);
         let answer;try{answer=await request.json()}catch{return json({error:'Invalid answer'},400)}
         if(answer.type!=='answer'||typeof answer.sdp!=='string'||answer.sdp.length>100000)return json({error:'Invalid answer'},400);
-        await env.BUCKET.put('rtc/answer/'+id,JSON.stringify({...answer,createdAt:Date.now()}),{httpMetadata:{contentType:'application/json'}});return json({ok:true});
+        await env.BUCKET.put('rtc/answer/'+id,JSON.stringify({...answer,createdAt:Date.now()}),{httpMetadata:{contentType:'application/json'}});
+        await env.BUCKET.delete('rtc/pending/'+id);
+        const legacy=await storageRead(env.BUCKET,'rtc/pending');
+        if(legacy&&(await legacy.json()).id===id)await env.BUCKET.delete('rtc/pending');
+        return json({ok:true});
       }
       if(request.method==='GET'){
         const object=await storageRead(env.BUCKET,'rtc/answer/'+id);if(!object)return new Response(null,{status:204,headers});
