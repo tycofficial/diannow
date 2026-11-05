@@ -265,7 +265,7 @@ class DesktopSession:
         now=time.monotonic() if now is None else now
         report=event.get('receiverReport')
         if not isinstance(report,dict):return
-        fields=['fps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
+        fields=['fps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
         values={key:value for key in fields if isinstance(value:=report.get(key),(int,float)) and not isinstance(value,bool) and math.isfinite(value)}
         if getattr(self,'track',None):self.track.delivery.receiver_feedback(values,now=now)
         if now-self.last_report_log<5:return
@@ -463,7 +463,7 @@ async def run_agent():
                             seen=pending['id']
                         await asyncio.sleep(.4)
                     except Exception as error:
-                        print(str(error),flush=True);await asyncio.sleep(2)
+                        print(json.dumps({'signalingError':type(error).__name__,'message':str(error)}),flush=True);await asyncio.sleep(2)
     finally:await agent.close()
 
 if __name__=='__main__':

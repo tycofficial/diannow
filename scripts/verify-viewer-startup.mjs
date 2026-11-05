@@ -11,7 +11,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
     const listeners={};
-    nodes[id]={textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
+    nodes[id]={textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
       classList:{toggle(){open=!open;return open}},setAttribute(){},appendChild(){},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
   }
   class Peer{
@@ -32,7 +32,8 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   function wrongReceiver(value){return value&&Object.prototype.toString.call(value.pointers)==='[object Map]'}
   function setTimer(callback,delay){if(wrongReceiver(this))throw new TypeError('Can only call Window.setTimeout on instances of Window');timers.set(++timerId,{callback,delay});return timerId}
   function clearTimer(id){if(wrongReceiver(this))throw new TypeError('Can only call Window.clearTimeout on instances of Window');timers.delete(id)}
-  const context=vm.createContext({window,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({}),addEventListener(){}},
+  const navigator={audioSession:{type:'auto'}};
+  const context=vm.createContext({window,navigator,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({}),addEventListener(){}},
     location:{hostname:'screen.example'},setTimeout:setTimer,clearTimeout:clearTimer,setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
@@ -49,7 +50,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   }
   async function fireTimer(delay){const entry=[...timers].find(([,timer])=>timer.delay===delay);assert(entry,'Expected a '+delay+' ms timer');timers.delete(entry[0]);entry[1].callback();await flush()}
   function dispatch(id,type,properties={}){const event={prevented:false,preventDefault(){this.prevented=true},...properties};for(const listener of nodes[id].listeners[type]||[])listener(event);return event}
-  return {nodes,stages,requests,peers,timers,fireTimer,channels,sent,dispatch,intervals,advanceTime:ms=>clockNow+=ms};
+  return {nodes,stages,requests,peers,timers,fireTimer,channels,sent,dispatch,intervals,navigator,advanceTime:ms=>clockNow+=ms};
 }
 const connected=await start(true);
 assert(connected.stages.includes('connected'));
@@ -162,7 +163,7 @@ for(const status of [503,200]){
   peer.stats=stats(3000,180,undefined,undefined);await viewer.intervals[0]();assert.match(nodes.stats.textContent,/缓冲 — ms/,'Unsupported delay statistics must not appear as zero');
   const reports=()=>viewer.sent.filter(event=>event.receiverReport);
   assert.equal(reports().length,1,'The prior valid measurement must ride the next ping');
-  assert.deepEqual(reports()[0].receiverReport,{fps:60,bufferMs:300,lossDelta:1,decodeMs:4,mbps:.05,inputAckMs:null,inputAckAgeMs:null,audioBufferMs:null,audioTotalSamplesDuration:null,audioTotalSamplesReceived:null,audioConcealedSamplesDelta:null,audioPlayoutSamplesDuration:null,audioTotalPlayoutDelay:null,audioTotalSamplesCount:null,audioPlayoutMs:null,audioBaseLatencyMs:null,audioOutputLatencyMs:null,videoDecodedDelta:60,videoDroppedDelta:null,playbackFramesDelta:null,playbackDroppedDelta:null});
+  assert.deepEqual(reports()[0].receiverReport,{audioRms:null,audioEnabled:0,audioContextState:null,audioOutputMode:0,audioElementMuted:1,fps:60,bufferMs:300,lossDelta:1,decodeMs:4,mbps:.05,inputAckMs:null,inputAckAgeMs:null,audioBufferMs:null,audioTotalSamplesDuration:null,audioTotalSamplesReceived:null,audioConcealedSamplesDelta:null,audioPlayoutSamplesDuration:null,audioTotalPlayoutDelay:null,audioTotalSamplesCount:null,audioPlayoutMs:null,audioBaseLatencyMs:null,audioOutputLatencyMs:null,videoDecodedDelta:60,videoDroppedDelta:null,playbackFramesDelta:null,playbackDroppedDelta:null});
   await viewer.intervals[0]();assert.equal(reports().length,1,'Receiver reports must be throttled rather than sent every second');
   viewer.advanceTime(5000);await viewer.intervals[0]();assert.equal(reports().length,2);assert.equal(reports()[1].receiverReport.bufferMs,null,'Unsupported buffer statistics must be reported as unknown');
   const videoStream=nodes.screen.srcObject,audioStream=nodes.desktopAudio.srcObject;
@@ -182,12 +183,13 @@ for(const status of [503,200]){
   let playback={totalVideoFrames:60,droppedVideoFrames:2};viewer.nodes.screen.getVideoPlaybackQuality=()=>playback;
   const richStats=second=>new Map([
     ['video',{id:'video',type:'inbound-rtp',kind:'video',timestamp:second*1000,framesDecoded:second*60,framesDropped:second===1?1:4,bytesReceived:second*100000,jitterBufferDelay:second*1.74,jitterBufferEmittedCount:second*60,totalDecodeTime:second*.24}],
-    ['audio',{id:'audio',type:'inbound-rtp',kind:'audio',timestamp:second*1000,jitterBufferDelay:second*72000,jitterBufferEmittedCount:second*48000,totalSamplesDuration:second,totalSamplesReceived:second*48000,concealedSamples:second===1?100:120}],
+    ['audio',{id:'audio',type:'inbound-rtp',kind:'audio',timestamp:second*1000,jitterBufferDelay:second*72000,jitterBufferEmittedCount:second*48000,totalSamplesDuration:second,totalAudioEnergy:second*.04,totalSamplesReceived:second*48000,concealedSamples:second===1?100:120}],
     ['playout',{id:'playout',type:'media-playout',kind:'audio',totalPlayoutDelay:second*9600,totalSamplesCount:second*48000,totalSamplesDuration:second}]
   ]);
   peer.stats=richStats(1);await viewer.intervals[0]();viewer.advanceTime(1000);playback={totalVideoFrames:120,droppedVideoFrames:7};peer.stats=richStats(2);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/画面缓冲 29 ms · 声音缓冲 1500 ms/);viewer.advanceTime(1000);await viewer.intervals[0]();
   const report=viewer.sent.findLast(event=>event.receiverReport).receiverReport;
   assert.equal(report.bufferMs,29);assert.equal(report.audioBufferMs,1500,'Audio delay must be measured independently of the low video buffer');
+  assert.equal(report.audioRms,.2,'Audio RMS must use actual received energy and duration deltas');
   assert.equal(report.inputAckMs,12,'Acknowledgement RTT must use the matching event send time');
   assert.equal(report.inputAckAgeMs,1000,'A delayed report must expose the age of the latest acknowledgement');
   assert.equal(report.audioTotalSamplesDuration,2);assert.equal(report.audioTotalSamplesReceived,96000);assert.equal(report.audioConcealedSamplesDelta,20);
@@ -195,7 +197,7 @@ for(const status of [503,200]){
   assert.equal(report.videoDecodedDelta,60);assert.equal(report.videoDroppedDelta,3);assert.equal(report.playbackFramesDelta,60);assert.equal(report.playbackDroppedDelta,5);
   peer.stats=richStats(1);playback={totalVideoFrames:10,droppedVideoFrames:0};await viewer.intervals[0]();viewer.advanceTime(5000);await viewer.intervals[0]();
   const reset=viewer.sent.findLast(event=>event.receiverReport).receiverReport;
-  for(const field of ['audioBufferMs','audioConcealedSamplesDelta','audioPlayoutMs','videoDecodedDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta'])assert.equal(reset[field],null,'A reset counter must not yield a fabricated '+field);
+  for(const field of ['audioRms','audioBufferMs','audioConcealedSamplesDelta','audioPlayoutMs','videoDecodedDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta'])assert.equal(reset[field],null,'A reset counter must not yield a fabricated '+field);
 }
 {
   const snapshot=(id,ssrc,timestamp,frames,delay=frames*.029)=>new Map([['video',{id,ssrc,type:'inbound-rtp',kind:'video',timestamp,framesDecoded:frames,bytesReceived:frames*1000,jitterBufferDelay:delay,jitterBufferEmittedCount:frames}]]);
@@ -210,9 +212,9 @@ for(const status of [503,200]){
 function mockAudioContext(options={}){
   const contexts=[];
   class MockContext{
-    state='suspended';baseLatency=.005;outputLatency=.01;sources=[];gains=[];resumeCalls=0;destination={};
+    state='suspended';onstatechange=null;baseLatency=.005;outputLatency=.01;sources=[];gains=[];resumeCalls=0;destination={};
     constructor(config){this.config=config;contexts.push(this);if(options.constructFails)throw new Error('No audio device')}
-    async resume(){this.resumeCalls++;if(options.resumeFails)throw new Error('Gesture required');if(options.resumePending)await options.resumePending;this.state='running'}
+    async resume(){this.resumeCalls++;if(options.resumeFails)throw new Error('Gesture required');if(options.resumePending)await options.resumePending;this.state='running';this.onstatechange?.()}
     createMediaStreamSource(stream){if(options.sourceFails)throw new Error('Stream source unavailable');const source={stream,disconnected:false,connect(){},disconnect(){this.disconnected=true}};this.sources.push(source);return source}
     createGain(){const gain={gain:{value:0},disconnected:false,connect(){},disconnect(){this.disconnected=true}};this.gains.push(gain);return gain}
   }
@@ -224,17 +226,36 @@ function attachAudio(viewer){const peer=viewer.peers.at(-1),track={kind:'audio',
   attachAudio(viewer);assert.equal(mock.contexts.length,0,'Only a sound-button user gesture may create or resume the audio context');
   await viewer.nodes.audio.onclick();const context=mock.contexts[0];
   assert.equal(context.config.latencyHint,'interactive');assert.equal(context.state,'running');assert.equal(context.resumeCalls,1);
+  assert.equal(viewer.navigator.audioSession.type,'playback');
   assert.equal(audio.muted,true,'The element must remain muted while Web Audio is audible');assert.equal(audio.playCalls,0,'Web Audio must not also start the element playback path');assert.equal(context.gains[0].gain.value,1);
   assert.equal(context.sources[0].stream,viewer.nodes.desktopAudio.srcObject);
   const stats=second=>new Map([['video',{type:'inbound-rtp',kind:'video',timestamp:second*1000,framesDecoded:second*60,bytesReceived:second*10000,jitterBufferDelay:second,jitterBufferEmittedCount:second*60}]]);
   viewer.peers[0].stats=stats(1);await viewer.intervals[0]();viewer.peers[0].stats=stats(2);await viewer.intervals[0]();await viewer.intervals[0]();
   const report=viewer.sent.findLast(event=>event.receiverReport).receiverReport;assert.equal(report.audioBaseLatencyMs,5);assert.equal(report.audioOutputLatencyMs,10);
+  assert.equal(report.audioEnabled,1);assert.equal(report.audioContextState,1);assert.equal(report.audioOutputMode,1);assert.equal(report.audioElementMuted,1);
   await viewer.nodes.audio.onclick();assert.equal(context.sources[0].disconnected,true);assert.equal(audio.muted,true);assert.equal(viewer.nodes.audio.textContent,'开启声音');
   await viewer.nodes.audio.onclick();assert.equal(mock.contexts.length,1);assert.equal(context.resumeCalls,1,'Unmuting an already running context must reuse the unlocked context');
   const oldSource=context.sources.at(-1);viewer.peers[0].connectionState='failed';viewer.peers[0].onconnectionstatechange();await viewer.fireTimer(3000);
   assert.equal(oldSource.disconnected,true,'Reconnection must disconnect the old stream immediately');attachAudio(viewer);await flush();
   assert.equal(mock.contexts.length,1);assert.equal(context.resumeCalls,1,'Reconnection must not attempt resume without a user gesture');assert.equal(context.sources.at(-1).stream,audio.srcObject);assert.equal(audio.muted,true);
   await viewer.nodes.stop.onclick();assert.equal(context.sources.at(-1).disconnected,true);assert.equal(audio.srcObject,null);
+}
+{
+  const mock=mockAudioContext(),viewer=await start(true,scripts,undefined,mock.MockContext);attachAudio(viewer);
+  await viewer.nodes.audio.onclick();const context=mock.contexts[0];
+  context.state='interrupted';context.onstatechange();assert.equal(viewer.nodes.audio.textContent,'恢复声音');
+  await viewer.nodes.audio.onclick();assert.equal(context.state,'running');assert.equal(context.resumeCalls,2);assert.equal(viewer.nodes.audio.textContent,'静音');
+  assert.equal(viewer.nodes.desktopAudio.muted,true,'Resuming Web Audio must keep only one audible path');
+  viewer.nodes.audioMode.value='compatible';await viewer.nodes.audioMode.onchange();
+  assert.equal(context.sources.at(-1).disconnected,true);assert.equal(viewer.nodes.desktopAudio.muted,false);assert.equal(viewer.nodes.desktopAudio.playCalls,1);
+  context.state='suspended';context.onstatechange();assert.equal(viewer.nodes.audio.textContent,'静音','An unused suspended context must not affect the compatible player');
+  await viewer.nodes.audio.onclick();assert.equal(viewer.nodes.desktopAudio.muted,true);assert.equal(viewer.nodes.audio.textContent,'开启声音');
+  viewer.nodes.audioMode.value='low';await viewer.nodes.audioMode.onchange();assert.equal(context.resumeCalls,3);assert.equal(viewer.nodes.desktopAudio.muted,true);assert.equal(viewer.nodes.audio.textContent,'静音');
+}
+{
+  const mock=mockAudioContext(),viewer=await start(true,scripts,undefined,mock.MockContext);attachAudio(viewer);
+  viewer.nodes.audioMode.value='compatible';await viewer.nodes.audioMode.onchange();
+  assert.equal(mock.contexts.length,0,'Explicit compatible playback must work without Web Audio');assert.equal(viewer.nodes.desktopAudio.muted,false);assert.equal(viewer.nodes.audio.textContent,'静音');
 }
 {
   const mock=mockAudioContext({sourceFails:true}),viewer=await start(true,scripts,undefined,mock.MockContext);attachAudio(viewer);

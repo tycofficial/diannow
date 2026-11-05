@@ -52,4 +52,25 @@ for rate in [44100,48000]:
                 fresh_after_gap.append(stamp)
             previous_stamp=stamp
         assert rebuilds==1 and len(fresh_after_gap)>=5
-print('Audio timeline checks passed: reproduced stale Opus timestamp after a 1.8 s gap; fixed packets match capture time immediately, decode, and preserve normal continuous encoding. No devices or network used.')
+
+# Silence can validate timing while hiding a broken audio signal path. Feed
+# a non-silent waveform only through in-memory codecs, including a capture
+# gap, and verify that every decoded packet still contains useful energy.
+signal_results=[]
+for rate in [44100,48000]:
+    for channels in [1,2]:
+        encoder=TimelineOpusEncoder();decoder=OpusDecoder();samples=rate//50;levels=[]
+        for index in range(40):
+            pts=index*samples+(rate*18//10 if index>=20 else 0)
+            sample_time=np.arange(samples)+pts
+            mono=(np.sin(2*np.pi*440*sample_time/rate)*12000).astype(np.int16)
+            pcm=np.repeat(mono[:,None],channels,axis=1).reshape(1,-1)
+            source=av.AudioFrame.from_ndarray(pcm,format='s16',layout='stereo' if channels==2 else 'mono')
+            source.sample_rate=rate;source.pts=pts;source.time_base=fractions.Fraction(1,rate)
+            packets,stamp=encoder.encode(source)
+            for packet in packets:
+                for decoded in decoder.decode(JitterFrame(data=packet,timestamp=stamp)):
+                    levels.append(float(np.sqrt(np.mean(decoded.to_ndarray().astype(np.float64)**2))))
+        assert len(levels)>=38 and min(levels)>1000,'A live timeline must preserve non-silent audio across a gap.'
+        signal_results.append((rate,channels,round(min(levels),1)))
+print('Audio timeline checks passed: reproduced stale Opus timestamp after a 1.8 s gap; fixed packets match capture time immediately, decode, and preserve non-silent audio energy across all sample-rate/channel combinations. No devices or network used.')
