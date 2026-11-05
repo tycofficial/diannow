@@ -4,10 +4,30 @@
 main,video{min-width:0;min-height:0}
 button,textarea{border-radius:0!important;box-shadow:none!important}
 header,footer,#stats{background:#1b1c1e}button,#keyboard{background:#2b2d30;border-color:#4b4d52}button[aria-pressed=true]{background:#53565c}nav{gap:4px}h1{font-weight:500}header{padding:8px 10px}#tools{gap:4px}#tools button{min-width:40px}textarea{min-height:40px}#notice{position:absolute;bottom:8px;left:12px;right:12px;pointer-events:none;text-align:center;font-size:12px;color:#eee;background:rgba(0,0,0,.72)}#notice:empty{display:none}
-#qualitybar{padding:6px 10px;background:#1b1c1e;font-size:12px;display:flex;gap:8px;flex-wrap:wrap}select{font:inherit;color:#eee;background:#2b2d30;border:1px solid #555;border-radius:0;padding:5px}#qualityhint{color:#aaa}</style></head><body>
-<header><div><h1>远程电脑</h1><div id="status" class="status" role="status">正在连接</div></div><nav><button id="audio">开启声音</button><button id="fullscreen">全屏</button><button id="connect">重连</button></nav></header>
+#qualitybar{padding:6px 10px;background:#1b1c1e;font-size:12px;display:flex;gap:8px;flex-wrap:wrap}select{font:inherit;color:#eee;background:#2b2d30;border:1px solid #555;border-radius:0;padding:5px}#qualityhint{color:#aaa}
+/* Portrait keeps full-width bars; landscape uses the unused screen edges. */
+body{height:var(--app-height,100dvh);display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto auto auto;grid-template-areas:"header" "desktop" "quality" "stats" "tools"}
+#leftRail{display:contents}header{grid-area:header}main{grid-area:desktop}#qualitybar{grid-area:quality}#stats{grid-area:stats}footer{grid-area:tools;min-height:0;min-width:0}
+@media (orientation:landscape) and (max-width:1400px){
+ body{--rail:clamp(58px,calc((100vw - var(--app-height,100dvh)*16/9)/2),112px);padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);grid-template-columns:var(--rail) minmax(0,1fr) var(--rail);grid-template-rows:minmax(0,1fr);grid-template-areas:"left desktop tools";gap:0;background:#080b11}
+ #leftRail{grid-area:left;display:flex;flex-direction:column;min-height:0;overflow:auto;background:#1b1c1e;scrollbar-width:none}
+ header,body:fullscreen header{display:flex;flex-direction:column;align-items:stretch;gap:5px;padding:5px 4px}
+ h1{display:none}.status{font-size:10px;line-height:1.35;overflow-wrap:anywhere;margin:0}
+ nav{flex-direction:column;gap:4px}nav button{width:100%}
+ main{height:100%;width:100%;min-height:0;min-width:0}video{height:100%;width:100%;object-fit:contain}
+ #qualitybar{display:flex;flex-direction:column;gap:5px;padding:5px 4px;font-size:10px}
+ #qualitybar label{display:flex;flex-direction:column;gap:2px;min-width:0}#qualitybar select{width:100%;min-width:0;font-size:10px;padding:5px 1px}#qualityhint{font-size:9px;line-height:1.3}
+ #stats{margin-top:auto;padding:5px 4px;min-height:0;font-size:9px;line-height:1.4;overflow-wrap:anywhere}
+ footer{height:100%;overflow-y:auto;padding:5px 4px;background:#1b1c1e;scrollbar-width:none}
+ #tools{display:flex;flex-direction:column;gap:4px;overflow:visible}#tools button,nav button{font-size:11px;padding:7px 2px;min-height:31px;min-width:0}
+ #keyboardbox.open,#keys.open{position:fixed;z-index:10;left:calc(var(--rail) + env(safe-area-inset-left) + 6px);right:calc(var(--rail) + env(safe-area-inset-right) + 6px);bottom:calc(env(safe-area-inset-bottom) + 6px);max-height:55%;overflow:auto;background:#1b1c1e;border:1px solid #555;padding:8px}
+ #keyboardbox textarea{min-height:40px;height:48px}#typingControls{flex-wrap:wrap;font-size:11px}#inputHint{font-size:10px}#keys.open{display:flex;gap:4px}#keys button{padding:7px;font-size:11px}
+ #overlay{padding:10px;font-size:12px}#notice{left:6px;right:6px;bottom:5px;font-size:11px}
+}
+</style></head><body>
+<aside id="leftRail"><header><div><h1>远程电脑</h1><div id="status" class="status" role="status">正在连接</div></div><nav><button id="audio">开启声音</button><button id="fullscreen">全屏</button><button id="connect">重连</button></nav></header><div id="qualitybar"><label>清晰度 <select id="quality"><option value="auto">自动 · 优先60帧</option><option value="2160">4K · 待检测</option><option value="1080">高清1080P · 未测</option><option value="720">720P · 未测</option></select></label> <label>帧率 <select id="framerate"><option>60</option><option>30</option><option>120</option></select> fps</label><label>声音播放 <select id="audioMode"><option value="low">低延迟</option><option value="compatible">兼容</option></select></label><span id="qualityhint"></span></div><div id="stats">接收 — fps · 网络往返 — ms · 画面缓冲 — ms</div></aside>
 <main><video id="screen" autoplay playsinline muted aria-label="远程电脑完整桌面，支持点击和拖动"></video><audio id="desktopAudio" autoplay muted hidden></audio><div id="overlay">正在建立视频连接…</div><div id="notice" role="status"></div></main>
-<div id="qualitybar"><label>清晰度 <select id="quality"><option value="auto">自动 · 优先60帧</option><option value="2160">4K · 待检测</option><option value="1080">高清1080P · 未测</option><option value="720">720P · 未测</option></select></label> <label>帧率 <select id="framerate"><option>60</option><option>30</option><option>120</option></select> fps</label><label>声音播放 <select id="audioMode"><option value="low">低延迟</option><option value="compatible">兼容</option></select></label><span id="qualityhint"></span></div><div id="stats">接收 — fps · 网络往返 — ms · 画面缓冲 — ms</div>
+
 <footer><div id="tools"><button id="keyboard">键盘</button><button id="microphone">麦克风</button><button id="escape">Esc</button><button data-mod="Control" aria-pressed="false">Ctrl</button><button data-mod="Alt" aria-pressed="false">Alt</button><button data-mod="Shift" aria-pressed="false">Shift</button><button data-mod="Meta" aria-pressed="false">Win</button><button id="right">右键</button><button id="more">更多</button><button id="stop">断开</button></div>
 <div id="keyboardbox"><div id="typingControls" style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><label>发送方式 <select id="typingMode"><option value="live">实时发送</option><option value="draft">编辑后发送</option></select></label><button id="sendTyping" hidden>发送</button></div><textarea id="typing" aria-label="远程键盘输入" maxlength="4096" placeholder="在这里打字，内容会实时发送" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><p id="inputHint">输入会立即发送 · 轻点点击 · 单指滑动滚动 · 长按拖动</p></div>
 <div id="keys"></div></footer>
@@ -186,6 +206,8 @@ setInterval(async()=>{
   }previousStats=inbound;previousAudioStats=audioInbound||null;previousPlayoutStats=audioPlayout||null;previousPlaybackQuality=playbackQuality;
  }catch{}
 },1000);
+function fitViewport(){if(window.visualViewport&&document.documentElement?.style)document.documentElement.style.setProperty('--app-height',window.visualViewport.height+'px')}
+window.visualViewport?.addEventListener('resize',fitViewport);window.addEventListener('resize',fitViewport);fitViewport();
 window.desktopBoot.stage('ready');connect();
 window.addEventListener('pageshow',event=>{if(event.persisted)location.reload()});
 }catch(error){window.desktopBoot.fail(error.message)}

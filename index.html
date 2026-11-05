@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>远程电脑</title><style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#080b11;color:#edf2ff}body{height:100dvh;display:flex;flex-direction:column;overflow:hidden}header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:11px 14px;background:#151b28;flex:none}h1{font-size:15px;margin:0;font-weight:600}.status{font-size:11px;color:#aab8ce;margin-top:4px}button{font:inherit;font-size:12px;line-height:1.3;color:#e5edfc;background:#252e42;border:1px solid #3d4b68;border-radius:7px;padding:9px 11px;white-space:nowrap;cursor:pointer}button:disabled{opacity:.5;cursor:default}button[aria-pressed=true]{background:#3269be;border-color:#82afff}button:focus-visible,textarea:focus-visible{outline:2px solid #88b7ff;outline-offset:2px}#stop{color:#ffbec5;background:#39212c;border-color:#6e3d4e}nav{display:flex;gap:6px}main{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}video{width:100%;height:100%;object-fit:contain;display:block;touch-action:none;user-select:none}#overlay{position:absolute;inset:0;display:flex;justify-content:center;align-items:center;text-align:center;background:rgba(8,11,17,.85);padding:24px;font-size:14px;line-height:1.8;pointer-events:none}#overlay:empty{display:none}#stats{padding:6px 12px;font-size:11px;color:#acbbd2;background:#101521;flex:none;font-variant-numeric:tabular-nums;min-height:25px}footer{background:#151b28;padding:8px 10px max(8px,env(safe-area-inset-bottom));flex:none}#tools{display:flex;gap:6px;overflow:auto}#tools button{min-width:43px}#keyboard{background:#3065b7;border-color:#6498ea}#keyboardbox{padding-top:8px;display:none}#keyboardbox.open{display:block}textarea{width:100%;min-height:52px;max-height:100px;border:1px solid #596b8e;border-radius:7px;background:#0c121e;color:#edf2ff;padding:9px;font-family:inherit;font-size:16px;resize:none}#keys{display:none;gap:6px;flex-wrap:wrap;padding-top:8px}#keys.open{display:flex}#inputHint{color:#aab8ce;font-size:11px;margin:6px 0 0}@media(max-width:400px){header{padding:8px 10px;gap:6px}button{padding:8px}h1{font-size:14px}}body:fullscreen header{display:none}body:fullscreen #stats{opacity:.8}
+main,video{min-width:0;min-height:0}
+button,textarea{border-radius:0!important;box-shadow:none!important}
+header,footer,#stats{background:#1b1c1e}button,#keyboard{background:#2b2d30;border-color:#4b4d52}button[aria-pressed=true]{background:#53565c}nav{gap:4px}h1{font-weight:500}header{padding:8px 10px}#tools{gap:4px}#tools button{min-width:40px}textarea{min-height:40px}#notice{position:absolute;bottom:8px;left:12px;right:12px;pointer-events:none;text-align:center;font-size:12px;color:#eee;background:rgba(0,0,0,.72)}#notice:empty{display:none}
+#qualitybar{padding:6px 10px;background:#1b1c1e;font-size:12px;display:flex;gap:8px;flex-wrap:wrap}select{font:inherit;color:#eee;background:#2b2d30;border:1px solid #555;border-radius:0;padding:5px}#qualityhint{color:#aaa}
+/* Portrait keeps full-width bars; landscape uses the unused screen edges. */
+body{height:var(--app-height,100dvh);display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto auto auto;grid-template-areas:"header" "desktop" "quality" "stats" "tools"}
+#leftRail{display:contents}header{grid-area:header}main{grid-area:desktop}#qualitybar{grid-area:quality}#stats{grid-area:stats}footer{grid-area:tools;min-height:0;min-width:0}
+@media (orientation:landscape) and (max-width:1400px){
+ body{--rail:clamp(58px,calc((100vw - var(--app-height,100dvh)*16/9)/2),112px);padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);grid-template-columns:var(--rail) minmax(0,1fr) var(--rail);grid-template-rows:minmax(0,1fr);grid-template-areas:"left desktop tools";gap:0;background:#080b11}
+ #leftRail{grid-area:left;display:flex;flex-direction:column;min-height:0;overflow:auto;background:#1b1c1e;scrollbar-width:none}
+ header,body:fullscreen header{display:flex;flex-direction:column;align-items:stretch;gap:5px;padding:5px 4px}
+ h1{display:none}.status{font-size:10px;line-height:1.35;overflow-wrap:anywhere;margin:0}
+ nav{flex-direction:column;gap:4px}nav button{width:100%}
+ main{height:100%;width:100%;min-height:0;min-width:0}video{height:100%;width:100%;object-fit:contain}
+ #qualitybar{display:flex;flex-direction:column;gap:5px;padding:5px 4px;font-size:10px}
+ #qualitybar label{display:flex;flex-direction:column;gap:2px;min-width:0}#qualitybar select{width:100%;min-width:0;font-size:10px;padding:5px 1px}#qualityhint{font-size:9px;line-height:1.3}
+ #stats{margin-top:auto;padding:5px 4px;min-height:0;font-size:9px;line-height:1.4;overflow-wrap:anywhere}
+ footer{height:100%;overflow-y:auto;padding:5px 4px;background:#1b1c1e;scrollbar-width:none}
+ #tools{display:flex;flex-direction:column;gap:4px;overflow:visible}#tools button,nav button{font-size:11px;padding:7px 2px;min-height:31px;min-width:0}
+ #keyboardbox.open,#keys.open{position:fixed;z-index:10;left:calc(var(--rail) + env(safe-area-inset-left) + 6px);right:calc(var(--rail) + env(safe-area-inset-right) + 6px);bottom:calc(env(safe-area-inset-bottom) + 6px);max-height:55%;overflow:auto;background:#1b1c1e;border:1px solid #555;padding:8px}
+ #keyboardbox textarea{min-height:40px;height:48px}#typingControls{flex-wrap:wrap;font-size:11px}#inputHint{font-size:10px}#keys.open{display:flex;gap:4px}#keys button{padding:7px;font-size:11px}
+ #overlay{padding:10px;font-size:12px}#notice{left:6px;right:6px;bottom:5px;font-size:11px}
+}
+</style></head><body>
+<aside id="leftRail"><header><div><h1>远程电脑</h1><div id="status" class="status" role="status">正在连接</div></div><nav><button id="audio">开启声音</button><button id="fullscreen">全屏</button><button id="connect">重连</button></nav></header><div id="qualitybar"><label>清晰度 <select id="quality"><option value="auto">自动 · 优先60帧</option><option value="2160">4K · 待检测</option><option value="1080">高清1080P · 未测</option><option value="720">720P · 未测</option></select></label> <label>帧率 <select id="framerate"><option>60</option><option>30</option><option>120</option></select> fps</label><label>声音播放 <select id="audioMode"><option value="low">低延迟</option><option value="compatible">兼容</option></select></label><span id="qualityhint"></span></div><div id="stats">接收 — fps · 网络往返 — ms · 画面缓冲 — ms</div></aside>
+<main><video id="screen" autoplay playsinline muted aria-label="远程电脑完整桌面，支持点击和拖动"></video><audio id="desktopAudio" autoplay muted hidden></audio><div id="overlay">正在建立视频连接…</div><div id="notice" role="status"></div></main>
+
+<footer><div id="tools"><button id="keyboard">键盘</button><button id="microphone">麦克风</button><button id="escape">Esc</button><button data-mod="Control" aria-pressed="false">Ctrl</button><button data-mod="Alt" aria-pressed="false">Alt</button><button data-mod="Shift" aria-pressed="false">Shift</button><button data-mod="Meta" aria-pressed="false">Win</button><button id="right">右键</button><button id="more">更多</button><button id="stop">断开</button></div>
+<div id="keyboardbox"><div id="typingControls" style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><label>发送方式 <select id="typingMode"><option value="live">实时发送</option><option value="draft">编辑后发送</option></select></label><button id="sendTyping" hidden>发送</button></div><textarea id="typing" aria-label="远程键盘输入" maxlength="4096" placeholder="在这里打字，内容会实时发送" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><p id="inputHint">输入会立即发送 · 轻点点击 · 单指滑动滚动 · 长按拖动</p></div>
+<div id="keys"></div></footer>
+<script>
+(function(){
+  var stage='boot',origin=location.hostname.indexOf('.github.io')!==-1?'https://desktop-live-tianw-1105.tyc130923.chatgpt.site':'';
+  function report(next,message){
+    stage=next;
+    try{var xhr=new XMLHttpRequest();xhr.open('POST',origin+'/api/client-report',true);xhr.setRequestHeader('Content-Type','application/json');xhr.timeout=5000;xhr.send(JSON.stringify({stage:next,error:String(message||'').slice(0,300),rtc:typeof window.RTCPeerConnection,secure:window.isSecureContext,embedded:window.self!==window.top}));}catch(ignore){}
+  }
+  function fail(message){var overlay=document.getElementById('overlay'),status=document.getElementById('status');if(status)status.textContent='页面无法启动';if(overlay)overlay.textContent='连接程序未启动：'+message;report('startup-error',message);}
+  window.desktopBoot={stage:report,fail:fail};
+  window.addEventListener('error',function(event){if(event.message)fail(event.message);});
+  window.addEventListener('unhandledrejection',function(event){fail(event.reason&&event.reason.message||String(event.reason));});
+  report('boot');
+  setTimeout(function(){if(stage==='boot')fail('浏览器未执行连接程序，请重新载入页面');},5000);
+})();
+</script>
+<script>
+(function(){
+try{
+class TouchGestures {
+  constructor({emit,point,setTimer=(callback,delay)=>setTimeout(callback,delay),clearTimer=timer=>clearTimeout(timer)}){this.emit=emit;this.point=point;this.setTimer=setTimer;this.clearTimer=clearTimer;this.pointers=new Map();this.gesture=null;this.timer=null}
+  down(event){
+    this.pointers.set(event.pointerId,event);
+    if(this.pointers.size===1){
+      const start=this.point(event);this.gesture={x:event.clientX,y:event.clientY,lastY:event.clientY,start,scroll:false,drag:false};
+      this.emit({type:'move',...start});
+      this.timer=this.setTimer(()=>{if(this.gesture&&!this.gesture.scroll&&this.pointers.size===1){this.gesture.drag=true;this.emit({type:'button',button:0,down:true,...this.gesture.start})}},350);
+    }else{
+      this.clearTimer(this.timer);if(this.gesture?.drag)this.emit({type:'button',button:0,down:false});
+      if(this.gesture){this.gesture.scroll=true;this.gesture.drag=false;this.gesture.lastY=this.averageY()}
+    }
+  }
+  averageY(){return [...this.pointers.values()].reduce((sum,event)=>sum+event.clientY,0)/this.pointers.size}
+  move(event){
+    if(!this.pointers.has(event.pointerId)||!this.gesture)return;
+    this.pointers.set(event.pointerId,event);const g=this.gesture,y=this.pointers.size>1?this.averageY():event.clientY;
+    if(g.drag){this.emit({type:'move',...this.point(event)});return}
+    if(this.pointers.size>1||Math.hypot(event.clientX-g.x,event.clientY-g.y)>8){this.clearTimer(this.timer);g.scroll=true}
+    if(g.scroll){const delta=(y-g.lastY)*3;if(delta)this.emit({type:'wheel',delta:Math.round(delta),...g.start})}
+    g.lastY=y;
+  }
+  up(event){
+    if(!this.pointers.has(event.pointerId))return;
+    this.clearTimer(this.timer);const g=this.gesture;
+    if(this.pointers.size===1&&g){
+      if(g.drag)this.emit({type:'button',button:0,down:false,...this.point(event)});
+      else if(!g.scroll){const p=this.point(event);this.emit({type:'button',button:0,down:true,...p});this.emit({type:'button',button:0,down:false,...p})}
+    }
+    this.pointers.delete(event.pointerId);if(!this.pointers.size)this.gesture=null;else if(g)g.lastY=this.averageY();
+  }
+  cancel(){this.clearTimer(this.timer);if(this.gesture?.drag)this.emit({type:'button',button:0,down:false});this.pointers.clear();this.gesture=null}
+}
+
+const video=document.getElementById('screen'),desktopAudio=document.getElementById('desktopAudio'),statusEl=document.getElementById('status'),overlay=document.getElementById('overlay'),statsEl=document.getElementById('stats'),typing=document.getElementById('typing');
+let pc,control,motion,sessionId,connected=false,intentional=false,connecting=false,connectionGeneration=0,previousStats=null,lastFrame=0,pingRtt=0,sourceFps=0,held=new Set(),pointers=new Map(),mouseDown=false,lastY=0,composing=false,lastPoint={x:.5,y:.5},pendingMove=null,autoRetry,recoveryTimer;
+let touchGestures,pendingWheel=null,remoteStream,remoteAudioStream,microphoneSender,microphoneStream,microphoneReady=false,desktopAudioAvailable=false,inputId=0,moveSequence=0,noticeTimer;
+const qualitySelect=document.getElementById('quality'),fpsSelect=document.getElementById('framerate');
+let activeQuality='720',sourceHeight=0,sourceRefresh=60,qualitySamples={},sampleStart=0,autoTried=false,connectionDeadline,receiverReport=null,lastReceiverReport=0,previousAudioStats=null,previousPlayoutStats=null,previousPlaybackQuality=null,inputAckMs=null,inputAckAt=null;const pendingInputTimes=new Map();
+let audioContext=null,audioSource=null,audioGain=null,audioEnabled=false,audioOutputMode='off',audioGeneration=0,audioFallbackPreferred=false;
+function disconnectAudioGraph(){for(const node of [audioSource,audioGain]){try{node?.disconnect()}catch{}}audioSource=null;audioGain=null;audioOutputMode='off'}
+function installAudioContextStateHandler(){const context=audioContext;if(!context)return;context.onstatechange=()=>{if(audioContext!==context||!audioEnabled||!audioSource||!audioOutputMode.startsWith('webaudio'))return;if(context.state==='running'){audioOutputMode='webaudio';document.getElementById('audio').textContent='静音'}else{audioOutputMode='webaudio-suspended';document.getElementById('audio').textContent='恢复声音';notice('声音播放被系统暂停，请点击“恢复声音”')}}}
+function connectAudioGraph(stream){disconnectAudioGraph();audioSource=audioContext.createMediaStreamSource(stream);audioGain=audioContext.createGain();audioGain.gain.value=0;audioSource.connect(audioGain);audioGain.connect(audioContext.destination);desktopAudio.muted=true;audioGain.gain.value=1;audioOutputMode='webaudio';document.getElementById('audio').textContent='静音'}
+function resetAudioOutput(){audioGeneration++;disconnectAudioGraph();desktopAudio.muted=true;if(intentional)audioEnabled=false;document.getElementById('audio').textContent=audioEnabled?'等待声音…':'开启声音'}
+function audioTracksReady(){return remoteAudioStream&&remoteAudioStream.getAudioTracks().some(track=>track.readyState!=='ended')}
+async function enableAudio(fromGesture){
+ const generation=++audioGeneration,stream=remoteAudioStream;const current=()=>generation===audioGeneration&&audioEnabled&&connected&&remoteAudioStream===stream;
+ desktopAudio.muted=true;document.getElementById('audio').textContent='正在开启…';
+ try{
+  if(document.getElementById('audioMode').value==='compatible'||audioFallbackPreferred)throw new Error('Use the supported audio player');
+  const AudioContextClass=window.AudioContext||window.webkitAudioContext;if(!AudioContextClass)throw new Error('Web Audio is unavailable');
+  if(typeof navigator!=='undefined'&&navigator.audioSession){try{navigator.audioSession.type='playback'}catch{}}
+  if(!audioContext||audioContext.state==='closed'){if(!fromGesture)throw new Error('Tap to unlock audio');audioContext=new AudioContextClass({latencyHint:'interactive'});installAudioContextStateHandler()}
+  if(audioContext.state!=='running'){if(!fromGesture)throw new Error('Tap to resume audio');await audioContext.resume()}
+  if(!current())return;if(audioContext.state!=='running')throw new Error('Audio playback remains suspended');
+  connectAudioGraph(stream);return;
+ }catch{
+  if(!current())return;disconnectAudioGraph();desktopAudio.muted=false;
+  try{await desktopAudio.play();if(!current())return;audioFallbackPreferred=true;audioOutputMode='element';document.getElementById('audio').textContent='静音';notice('已开启声音，当前使用兼容播放')}
+  catch{if(!current())return;audioFallbackPreferred=false;audioEnabled=false;desktopAudio.muted=true;audioOutputMode='off';document.getElementById('audio').textContent='开启声音';notice('请再次点击开启声音，允许浏览器播放')}
+ }
+}
+function updateQualityLabels(){for(const option of qualitySelect.options){if(option.value==='auto')continue;const h=Number(option.value),v=qualitySamples[h];option.disabled=Boolean(sourceHeight&&h>sourceHeight);option.textContent=(h===2160?'4K':h===1080?'高清1080P':'720P')+' · '+(option.disabled?'源屏幕不支持':v?('平均 '+(v.total/v.seconds).toFixed(1)+' fps'):'未测');}for(const option of fpsSelect.options)option.disabled=Number(option.value)>sourceRefresh;}
+function applyQuality(){activeQuality=qualitySelect.value==='auto'?'720':qualitySelect.value;autoTried=false;sampleStart=Date.now();send({type:'settings',quality:activeQuality,fps:Number(fpsSelect.value)});document.getElementById('qualityhint').textContent=qualitySelect.value==='auto'?'优先60帧，稳定后尝试更高清晰度':'';}
+qualitySelect.onchange=applyQuality;fpsSelect.onchange=()=>{if(qualitySelect.value==='auto')qualitySelect.value=activeQuality;applyQuality()};
+function recordQuality(frames,elapsed){if(elapsed<=0||Date.now()-sampleStart<2000)return;const actual=video.videoHeight>=2000?'2160':video.videoHeight>=1000?'1080':'720';const v=qualitySamples[actual]||(qualitySamples[actual]={total:0,seconds:0});v.total+=Math.max(0,frames)*elapsed;v.seconds+=elapsed;updateQualityLabels();if(qualitySelect.value==='auto'&&v.seconds>=8&&actual===activeQuality){const average=v.total/v.seconds;if(average>=55&&!autoTried&&sourceHeight>=1080&&activeQuality==='720'){autoTried=true;activeQuality='1080';sampleStart=Date.now();send({type:'settings',quality:activeQuality,fps:60});}else if(average<50&&activeQuality!=='720'){activeQuality='720';sampleStart=Date.now();send({type:'settings',quality:'720',fps:60});document.getElementById('qualityhint').textContent='已选择更流畅的720P';}}}
+function notice(message){document.getElementById('notice').textContent=message;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>document.getElementById('notice').textContent='',4500)}
+const iceServers=[{urls:'stun:stun.cloudflare.com:3478'}];
+const signalingOrigin=location.hostname.endsWith('.github.io')?'https://desktop-live-tianw-1105.tyc130923.chatgpt.site':'';
+async function api(path,options={}){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);try{return await fetch(signalingOrigin+path,{...options,signal:controller.signal,credentials:'omit',referrerPolicy:'no-referrer'})}finally{clearTimeout(timer)}}
+function send(event,fast=false){const channel=fast?motion:control;if(event.type==='move')event.seq=++moveSequence;if(['key','text','button','wheel'].includes(event.type))event.id=++inputId;if(channel&&channel.readyState==='open'&&channel.bufferedAmount<65536){try{channel.send(JSON.stringify(event));if(event.id){pendingInputTimes.set(event.id,performance.now());if(pendingInputTimes.size>512)pendingInputTimes.delete(pendingInputTimes.keys().next().value)}return true}catch{return false}}return false}
+function release(){touchGestures?.cancel();if(mouseDown){send({type:'button',button:0,down:false});mouseDown=false}pointers.clear();pendingMove=null;pendingWheel=null;send({type:'release'})}
+function clearModifiers(){held.clear();document.querySelectorAll('[data-mod]').forEach(button=>button.setAttribute('aria-pressed','false'))}
+function key(name,modifiers=name==='Escape'?[]:[...held]){if(!send({type:'key',key:name,modifiers}))notice('输入通道尚未连接');clearModifiers()}
+function text(value){if([...held].some(mod=>['Control','Alt','Meta'].includes(mod))&&/^[a-z0-9]+$/i.test(value)){for(const char of value)key(char)}else send({type:'text',text:held.has('Shift')?value.replace(/[a-z]/g,char=>char.toUpperCase()):value})}
+async function closeConnection(){clearTimeout(connectionDeadline);clearTimeout(recoveryTimer);release();connected=false;resetAudioOutput();if(microphoneStream){microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null}document.getElementById('microphone').setAttribute('aria-pressed','false');video.srcObject=null;desktopAudio.srcObject=null;for(const stream of [remoteStream,remoteAudioStream])stream?.getTracks().forEach(track=>track.stop());remoteStream=null;remoteAudioStream=null;desktopAudioAvailable=false;previousStats=null;previousAudioStats=null;previousPlayoutStats=null;previousPlaybackQuality=null;pendingInputTimes.clear();inputAckMs=null;inputAckAt=null;receiverReport=null;lastReceiverReport=0;sourceFps=0;if(pc){const old=pc;pc=null;await old.close()}}
+function bindChannel(channel){channel.onmessage=event=>{if(channel!==control&&channel!==motion)return;try{const value=JSON.parse(event.data);if(value.type==='pong'){pingRtt=performance.now()-value.time;sourceFps=value.fps;sourceHeight=value.source?.height||sourceHeight;sourceRefresh=value.source?.refresh||60;updateQualityLabels();microphoneReady=Boolean(value.microphoneReady);desktopAudioAvailable=Boolean(value.audio);if(value.inputError)notice(value.inputError)}else if(value.type==='inputAck'){const sentAt=pendingInputTimes.get(value.id);if(sentAt!==undefined){inputAckAt=performance.now();inputAckMs=Math.max(0,inputAckAt-sentAt);pendingInputTimes.delete(value.id)}typingAck(value);if(value.error)notice(value.error)}}catch{}}}
+async function connect(){
+ if(connecting)return;connecting=true;intentional=false;clearTimeout(autoRetry);
+ const generation=++connectionGeneration;let active;const current=()=>generation===connectionGeneration&&!intentional&&(!active||pc===active);
+ try{
+  await closeConnection();if(!current())return;window.desktopBoot.stage('connecting');overlay.textContent='正在建立加密视频连接…';statusEl.textContent='正在连接电脑…';
+  if(typeof RTCPeerConnection!=='function')throw new Error('当前浏览器没有提供实时桌面所需的视频连接功能');
+  pc=new RTCPeerConnection({iceServers,bundlePolicy:'max-bundle'});active=pc;connectionDeadline=setTimeout(()=>{if(current()&&!connected){connectionGeneration++;connecting=false;closeConnection();statusEl.textContent='连接超时，正在重试';autoRetry=setTimeout(connect,3000)}},30000);
+  control=pc.createDataChannel('input',{ordered:true});motion=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});bindChannel(control);bindChannel(motion);
+  pc.addTransceiver('video',{direction:'recvonly'});
+  microphoneSender=pc.addTransceiver('audio',{direction:'sendrecv'}).sender;remoteStream=new MediaStream();remoteAudioStream=new MediaStream();video.srcObject=remoteStream;desktopAudio.srcObject=remoteAudioStream;
+  pc.ontrack=event=>{if(!current())return;for(const hint of ['jitterBufferTarget','playoutDelayHint']){try{if(hint in event.receiver)event.receiver[hint]=0}catch{}}if(event.track.kind==='video'){try{if('contentHint' in event.track)event.track.contentHint='detail'}catch{};remoteStream.addTrack(event.track);video.play().catch(()=>{})}else if(event.track.kind==='audio'){remoteAudioStream.addTrack(event.track);if(audioEnabled)enableAudio(false)}};
+  pc.onconnectionstatechange=()=>{
+   if(!current())return;const state=active.connectionState;connected=state==='connected';
+   if(connected){window.desktopBoot.stage('connected');clearTimeout(connectionDeadline);sampleStart=Date.now();clearTimeout(recoveryTimer);clearTimeout(autoRetry);lastFrame=Date.now();statusEl.textContent='已连接 · 原始分辨率';overlay.textContent='';connecting=false;send({type:'release'});if(audioEnabled&&audioTracksReady())enableAudio(false)}
+   else if(state==='disconnected'){
+    release();statusEl.textContent='网络短时波动，正在恢复';
+    clearTimeout(recoveryTimer);recoveryTimer=setTimeout(()=>{if(pc===active&&active.connectionState==='disconnected'&&!intentional){connecting=false;connect()}},12000);
+   }else if(['failed','closed'].includes(state)){
+    clearTimeout(recoveryTimer);release();statusEl.textContent='连接已断开';overlay.textContent=intentional?'连接已断开':'连接中断，正在重试…';connecting=false;
+    if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,3000)}
+   }
+  };
+  const localOffer=await active.createOffer();if(!current())return;await active.setLocalDescription(localOffer);if(!current())return;
+  window.desktopBoot.stage('offer-created');
+  await Promise.race([new Promise(resolve=>{if(active.iceGatheringState==='complete')resolve();else active.addEventListener('icegatheringstatechange',()=>{if(active.iceGatheringState==='complete')resolve()})}),new Promise(resolve=>setTimeout(resolve,5000))]);
+  if(!current())return;
+  const offer=active.localDescription;
+  const response=await api('/api/offer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sdp:offer.sdp,type:offer.type,preferences:{quality:qualitySelect.value==='auto'?'720':qualitySelect.value,fps:Number(fpsSelect.value)}})});
+  if(!current())return;
+  if(!response.ok)throw new Error('建立连接失败：HTTP '+response.status);
+  const result=await response.json();
+  if(!current())return;
+  window.desktopBoot.stage('offer-sent');
+  if(result.sdp){await active.setRemoteDescription(result);if(!current())return}else{
+   const pendingId=result.id;sessionId=pendingId;const deadline=Date.now()+45000;let answered=false;
+   while(Date.now()<deadline&&current()){
+    const reply=await api('/api/answer/'+pendingId,{cache:'no-store'});
+    if(!current())return;
+    if(reply.status===200){const answer=await reply.json();if(!current())return;await active.setRemoteDescription(answer);if(!current())return;window.desktopBoot.stage('answer-received');answered=true;break}
+    if(![204,404].includes(reply.status))throw new Error('电脑连接失败：HTTP '+reply.status);
+    await new Promise(resolve=>setTimeout(resolve,350));
+   }
+   if(!current())return;
+   if(!answered)throw new Error('电脑端未响应，请确认连接程序正在运行');
+  }
+  setTimeout(()=>{if(current()&&!connected){overlay.textContent='网络直连尚未成功。可重试；受限网络需要中继服务。';statusEl.textContent='网络连接超时，正在重试';connecting=false;autoRetry=setTimeout(connect,3000)}},18000);
+ }catch(error){if(!current())return;window.desktopBoot.stage('connection-error',error.message);statusEl.textContent='连接失败，正在重试';overlay.textContent=error.message;connecting=false;if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,5000)}}
+}
+function point(event){const bounds=video.getBoundingClientRect(),vw=video.videoWidth||1280,vh=video.videoHeight||720,scale=Math.min(bounds.width/vw,bounds.height/vh),w=vw*scale,h=vh*scale;return{x:Math.max(0,Math.min(1,(event.clientX-bounds.left-(bounds.width-w)/2)/w)),y:Math.max(0,Math.min(1,(event.clientY-bounds.top-(bounds.height-h)/2)/h))}}
+touchGestures=new TouchGestures({point,emit:event=>{if(event.type==='wheel'){pendingWheel={...event,delta:Math.max(-1200,Math.min(1200,(pendingWheel?.delta||0)+event.delta))}}else send(event)}});
+video.onpointerdown=event=>{if(!connected)return;event.preventDefault();typing.blur();video.setPointerCapture(event.pointerId);lastPoint=point(event);pendingMove=null;if(event.pointerType==='touch'){touchGestures.down(event);return}mouseDown=true;send({type:'button',button:event.button===2?2:0,down:true,...lastPoint})};
+video.onpointermove=event=>{if(!connected)return;event.preventDefault();if(event.pointerType==='touch'){touchGestures.move(event);return}lastPoint=point(event);pendingMove={type:'move',...lastPoint}};
+video.onpointerup=event=>{if(event.pointerType==='touch'){touchGestures.up(event);return}send({type:'button',button:event.button===2?2:0,down:false,...point(event)});mouseDown=false};video.onpointercancel=release;video.oncontextmenu=event=>event.preventDefault();video.onwheel=event=>{event.preventDefault();const multiplier=event.deltaMode===1?16:event.deltaMode===2?video.clientHeight:1;pendingWheel={type:'wheel',delta:Math.max(-1200,Math.min(1200,(pendingWheel?.delta||0)-event.deltaY*multiplier)),...point(event)}};
+function moveLoop(){if(pendingMove){send(pendingMove,true);pendingMove=null}if(pendingWheel){send(pendingWheel);pendingWheel=null}requestAnimationFrame(moveLoop)}moveLoop();
+window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release()});
+document.getElementById('keyboard').onclick=()=>{const open=document.getElementById('keyboardbox').classList.toggle('open');document.getElementById('keyboard').textContent=open?'收起键盘':'打开键盘';if(open)typing.focus();else typing.blur()};
+const typingMode=document.getElementById('typingMode'),sendTyping=document.getElementById('sendTyping');let manualDraft='',pendingTyping=null;
+function updateTypingMode(){const draft=typingMode.value==='draft';sendTyping.hidden=!draft;typing.placeholder=draft?'在这里编辑或语音输入，完成后点击发送':'在这里打字，内容会实时发送';document.getElementById('inputHint').textContent=draft?'草稿保留在输入框 · 支持换行 · 点击发送或 Ctrl+Enter · 最多4096字':'输入会立即发送 · 轻点点击 · 单指滑动滚动 · 长按拖动'}
+typingMode.onchange=()=>{if(typingMode.value==='live'){manualDraft=typing.value;typing.value=''}else typing.value=manualDraft;composing=false;updateTypingMode()};
+function finishTyping(){if(!pendingTyping)return;clearTimeout(pendingTyping.timer);pendingTyping=null;sendTyping.disabled=false;sendTyping.textContent='发送';typing.readOnly=false;typingMode.disabled=false}
+function typingAck(value){if(!pendingTyping||value.id!==pendingTyping.id)return;if(!value.error){if(typing.value===pendingTyping.text)typing.value='';manualDraft=typing.value;notice('已发送')}finishTyping()}
+function submitTyping(){
+ if(typingMode.value!=='draft'||pendingTyping)return;
+ if(composing){notice('请先结束语音输入或文字选词，再点击发送');return}
+ const value=typing.value;if(!value)return;if(value.length>4096){notice('内容超过4096字，请缩短后发送');return}
+ if(!connected){notice('尚未连接电脑，草稿已保留');return}
+ const event={type:'text',text:value};let sent=false;try{sent=send(event)}catch{}
+ if(!sent){notice('发送失败，草稿已保留，请稍后重试');return}
+ pendingTyping={id:event.id,text:value,timer:setTimeout(()=>{finishTyping();notice('未收到发送确认，草稿已保留，请检查电脑后再重试')},10000)};
+ sendTyping.disabled=true;sendTyping.textContent='正在发送…';typing.readOnly=true;typingMode.disabled=true;
+}
+sendTyping.onclick=submitTyping;updateTypingMode();
+typing.addEventListener('compositionstart',()=>composing=true);typing.addEventListener('compositionend',event=>{composing=false;if(typingMode.value==='draft'){manualDraft=typing.value;return}if(event.data)text(event.data);typing.value=''});
+typing.addEventListener('input',event=>{if(typingMode.value==='draft'){manualDraft=typing.value;return}if(composing||event.isComposing)return;if(typing.value)text(typing.value);typing.value=''});
+typing.addEventListener('beforeinput',event=>{if(typingMode.value==='draft')return;if(!composing&&event.inputType.startsWith('delete')){event.preventDefault();key(event.inputType.includes('Forward')?'Delete':'Backspace')}});
+typing.addEventListener('keydown',event=>{
+ if(typingMode.value==='draft'){if(!composing&&!event.isComposing&&event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();submitTyping()}return}
+ if(composing||event.isComposing)return;
+ if(['Enter','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.key)){
+  event.preventDefault();key(event.key);
+ }else if((event.ctrlKey||event.altKey||event.metaKey||held.size)&&event.key.length===1){
+  event.preventDefault();
+  const modifiers=[...held];
+  if(event.ctrlKey)modifiers.push('Control');if(event.altKey)modifiers.push('Alt');if(event.metaKey)modifiers.push('Meta');if(event.shiftKey)modifiers.push('Shift');
+  key(event.key,[...new Set(modifiers)]);
+ }
+});
+document.querySelectorAll('[data-mod]').forEach(button=>button.onclick=()=>{const mod=button.dataset.mod;if(held.has(mod))held.delete(mod);else held.add(mod);button.setAttribute('aria-pressed',held.has(mod))});
+const keys=['Escape','Tab','Enter','Backspace','Delete','Home','End','PageUp','PageDown','ArrowLeft','ArrowUp','ArrowDown','ArrowRight','Space',...Array.from({length:12},(_,i)=>'F'+(i+1))];const labels={Escape:'Esc',Backspace:'退格',Delete:'Del',ArrowLeft:'←',ArrowUp:'↑',ArrowDown:'↓',ArrowRight:'→',Space:'空格'};
+for(const name of keys){const button=document.createElement('button');button.textContent=labels[name]||name;button.onclick=()=>key(name);document.getElementById('keys').appendChild(button)}
+for(const [label,name,modifiers] of [['全选','a',['Control']],['复制','c',['Control']],['粘贴','v',['Control']],['剪切','x',['Control']],['撤销','z',['Control']],['切换窗口','Tab',['Alt']]]){const button=document.createElement('button');button.textContent=label;button.onclick=()=>key(name,modifiers);document.getElementById('keys').appendChild(button)}
+document.getElementById('more').onclick=()=>document.getElementById('keys').classList.toggle('open');
+document.getElementById('right').onclick=()=>{send({type:'move',...lastPoint});send({type:'button',button:2,down:true});send({type:'button',button:2,down:false})};
+document.getElementById('escape').onclick=()=>key('Escape',[]);
+document.getElementById('audio').onclick=async()=>{if(audioEnabled){if(audioOutputMode.startsWith('webaudio')&&audioContext&&audioContext.state!=='running'){await enableAudio(true);return}audioEnabled=false;audioGeneration++;disconnectAudioGraph();desktopAudio.muted=true;document.getElementById('audio').textContent='开启声音';return}if(!connected){notice('请等待电脑连接');return}if(!desktopAudioAvailable||!audioTracksReady()){notice('电脑声音通道尚未就绪');return}audioEnabled=true;await enableAudio(true)};
+document.getElementById('audioMode').onchange=async()=>{audioFallbackPreferred=document.getElementById('audioMode').value==='compatible';audioGeneration++;disconnectAudioGraph();desktopAudio.muted=true;if(!connected||!desktopAudioAvailable||!audioTracksReady()){audioEnabled=false;document.getElementById('audio').textContent='开启声音';notice('电脑声音通道尚未就绪');return}audioEnabled=true;await enableAudio(true)};
+document.getElementById('microphone').onclick=async()=>{if(microphoneStream){await microphoneSender.replaceTrack(null);microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null;document.getElementById('microphone').setAttribute('aria-pressed','false');return}if(!connected){notice('请等待电脑连接');return}if(!microphoneReady){notice('电脑尚未配置虚拟麦克风，暂时无法送入 Codex');return}try{microphoneStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});await microphoneSender.replaceTrack(microphoneStream.getAudioTracks()[0]);document.getElementById('microphone').setAttribute('aria-pressed','true')}catch(error){notice('麦克风未开启：'+error.message)}};
+document.getElementById('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.body.requestFullscreen()}catch{statusEl.textContent='可将手机横屏放大'}};
+document.getElementById('connect').onclick=connect;document.getElementById('stop').onclick=async()=>{intentional=true;connectionGeneration++;clearTimeout(autoRetry);send({type:'disconnect'});await closeConnection();connecting=false;overlay.textContent='连接已断开';statusEl.textContent='已断开 · 重新连接可恢复'};
+setInterval(async()=>{
+ if(!pc||!connected)return;const ping={type:'ping',time:performance.now()},reportTime=Date.now();if(receiverReport&&reportTime-lastReceiverReport>=5000)ping.receiverReport=receiverReport;if(send(ping,true)&&ping.receiverReport)lastReceiverReport=reportTime;
+ try{const statsPeer=pc,report=await statsPeer.getStats();if(pc!==statsPeer||!connected)return;let inbound,audioInbound,audioPlayout,pair;report.forEach(value=>{const kind=value.kind||value.mediaType;if(value.type==='inbound-rtp'&&kind==='video')inbound=value;if(value.type==='inbound-rtp'&&kind==='audio')audioInbound=value;if(value.type==='media-playout'&&kind==='audio')audioPlayout=value;if(value.type==='candidate-pair'&&value.state==='succeeded'&&value.nominated)pair=value});if(lastFrame&&Date.now()-lastFrame>15000&&!document.hidden){connecting=false;connect();return}if(!inbound)return;let playbackQuality=null;try{if(typeof video.getVideoPlaybackQuality==='function'){const quality=video.getVideoPlaybackQuality();playbackQuality={totalVideoFrames:quality.totalVideoFrames,droppedVideoFrames:quality.droppedVideoFrames}}}catch{}
+  if(previousStats){
+   const rounded=value=>Number.isFinite(value)&&value>=0?Math.round(value*100)/100:null;const sameStream=(current,previous)=>current&&previous&&!(current.id!==undefined&&previous.id!==undefined&&current.id!==previous.id)&&!(current.ssrc!==undefined&&previous.ssrc!==undefined&&current.ssrc!==previous.ssrc);const delta=(current,previous,name)=>{if(!sameStream(current,previous))return null;const change=current[name]-previous[name];return Number.isFinite(current[name])&&Number.isFinite(previous[name])&&change>=0?change:null};
+   const elapsed=sameStream(inbound,previousStats)&&Number.isFinite(inbound.timestamp)&&Number.isFinite(previousStats.timestamp)?(inbound.timestamp-previousStats.timestamp)/1000:null,validInterval=elapsed!==null&&elapsed>0;
+   const decoded=validInterval?delta(inbound,previousStats,'framesDecoded'):null,frames=decoded!==null?decoded/elapsed:null,emitted=validInterval?delta(inbound,previousStats,'jitterBufferEmittedCount'):null,delay=validInterval?delta(inbound,previousStats,'jitterBufferDelay'):null,buffer=emitted>0&&delay!==null?1000*delay/emitted:null;
+   const rtt=Number.isFinite(pair?.currentRoundTripTime)&&pair.currentRoundTripTime>0?pair.currentRoundTripTime*1000:pingRtt,received=validInterval?delta(inbound,previousStats,'bytesReceived'):null,mbps=received!==null?8*received/elapsed/1e6:null,lost=validInterval?delta(inbound,previousStats,'packetsLost'):null,decodeTime=validInterval?delta(inbound,previousStats,'totalDecodeTime'):null;
+   const audioEnergy=delta(audioInbound,previousAudioStats,'totalAudioEnergy'),audioDuration=delta(audioInbound,previousAudioStats,'totalSamplesDuration'),audioEmitted=delta(audioInbound,previousAudioStats,'jitterBufferEmittedCount'),audioDelay=delta(audioInbound,previousAudioStats,'jitterBufferDelay'),playoutCount=delta(audioPlayout,previousPlayoutStats,'totalSamplesCount'),playoutDelay=delta(audioPlayout,previousPlayoutStats,'totalPlayoutDelay');
+   receiverReport={audioRms:audioEnergy!==null&&audioDuration>0?Math.round(Math.sqrt(audioEnergy/audioDuration)*1e6)/1e6:null,audioEnabled:audioEnabled?1:0,audioContextState:audioContext?({running:1,suspended:2,interrupted:3,closed:4}[audioContext.state]??null):null,audioOutputMode:({off:0,webaudio:1,element:2,'webaudio-suspended':3}[audioOutputMode]??null),audioElementMuted:desktopAudio.muted?1:0,fps:rounded(frames),bufferMs:rounded(buffer),lossDelta:rounded(lost),decodeMs:decoded>0&&decodeTime!==null?rounded(1000*decodeTime/decoded):null,mbps:rounded(mbps),inputAckMs:rounded(inputAckMs),inputAckAgeMs:inputAckAt!==null?rounded(performance.now()-inputAckAt):null,audioBufferMs:audioEmitted>0&&audioDelay!==null?rounded(1000*audioDelay/audioEmitted):null,audioTotalSamplesDuration:rounded(audioInbound?.totalSamplesDuration),audioTotalSamplesReceived:rounded(audioInbound?.totalSamplesReceived),audioConcealedSamplesDelta:delta(audioInbound,previousAudioStats,'concealedSamples'),audioPlayoutSamplesDuration:rounded(audioPlayout?.totalSamplesDuration),audioTotalPlayoutDelay:rounded(audioPlayout?.totalPlayoutDelay),audioTotalSamplesCount:rounded(audioPlayout?.totalSamplesCount),audioPlayoutMs:playoutCount>0&&playoutDelay!==null?rounded(1000*playoutDelay/playoutCount):null,audioBaseLatencyMs:audioOutputMode==='webaudio'&&Number.isFinite(audioContext?.baseLatency)?rounded(audioContext.baseLatency*1000):null,audioOutputLatencyMs:audioOutputMode==='webaudio'&&Number.isFinite(audioContext?.outputLatency)?rounded(audioContext.outputLatency*1000):null,videoDecodedDelta:decoded,videoDroppedDelta:validInterval?delta(inbound,previousStats,'framesDropped'):null,playbackFramesDelta:delta(playbackQuality,previousPlaybackQuality,'totalVideoFrames'),playbackDroppedDelta:delta(playbackQuality,previousPlaybackQuality,'droppedVideoFrames')};
+   if(frames!==null)recordQuality(frames,elapsed);statsEl.textContent=(video.videoWidth?video.videoWidth+' × '+video.videoHeight+' · ':'')+'接收 '+(frames===null?'—':frames.toFixed(0))+' fps · 发送 '+(sourceFps>0?sourceFps.toFixed(0):'—')+' fps · 往返 '+rtt.toFixed(0)+' ms · 画面缓冲 '+(buffer===null?'—':buffer.toFixed(0))+' ms'+(receiverReport.audioBufferMs!==null?' · 声音缓冲 '+receiverReport.audioBufferMs.toFixed(0)+' ms':'')+' · '+(mbps===null?'—':mbps.toFixed(1))+' Mbps';if(frames>0){lastFrame=Date.now();overlay.textContent=''}if(lastFrame&&Date.now()-lastFrame>7000){overlay.textContent='视频暂时中断，正在恢复…'}
+  }previousStats=inbound;previousAudioStats=audioInbound||null;previousPlayoutStats=audioPlayout||null;previousPlaybackQuality=playbackQuality;
+ }catch{}
+},1000);
+function fitViewport(){if(window.visualViewport&&document.documentElement?.style)document.documentElement.style.setProperty('--app-height',window.visualViewport.height+'px')}
+window.visualViewport?.addEventListener('resize',fitViewport);window.addEventListener('resize',fitViewport);fitViewport();
+window.desktopBoot.stage('ready');connect();
+window.addEventListener('pageshow',event=>{if(event.persisted)location.reload()});
+}catch(error){window.desktopBoot.fail(error.message)}
+})();
+</script></body></html>

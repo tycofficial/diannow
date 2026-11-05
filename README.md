@@ -3,9 +3,9 @@
 直接打开网页即可连接，不需要登录、密钥或粘贴分享链接。
 
 - ChatGPT Site：<https://desktop-live-tianw-1105.tyc130923.chatgpt.site/>
-- GitHub Pages：仓库开启 Pages 后，`main` 分支的 `/docs` 是发布目录。
+- GitHub Pages：<https://tycofficial.github.io/diannow/>
 
-`node scripts/build.mjs` 同时生成 Site Worker 和 GitHub Pages 页面，两处使用同一份浏览器代码。
+`node scripts/build.mjs` 同时生成 Site Worker、仓库根目录和 `/docs` 的 GitHub Pages 页面，使用同一份浏览器代码。手机横屏时将工具栏移到左右两侧，桌面画面使用全部可用高度；竖屏保留上下工具栏。
 
 ## 画面、声音和操作
 
@@ -22,6 +22,10 @@
 “麦克风”支持从手机或 iPad 回传声音。要让 Windows 软件将它识别为麦克风，电脑必须已有可用的虚拟音频输入设备，且目标软件使用该输入。当前实现支持将回传音频写入 `CABLE Input` 或 `VoiceMeeter Input`，由对应的虚拟麦克风端提供给软件。没有虚拟设备时页面会如实提示。
 
 ## 电脑端
+
+本机桌面上的 **远程桌面.exe** 可直接双击。窗口提供后台状态、启动、停止、重新连接和打开 GitHub 观看页面。关闭窗口后后台继续运行；登录、解锁和唤醒时会尝试启动，运行中的后台检测到睡眠唤醒后会重建采集。异常退出后会自动重试。关机及睡眠期间不能推流，重启后需要先登录 Windows。
+
+`scripts/build-desktop.ps1` 将当前电脑端及其运行依赖打包为单文件 EXE；`scripts/install-desktop.ps1` 保留现有 DPAPI 配置，备份旧启动任务，将真实 EXE 复制到桌面并更新 `CodexDesktopViewer` 计划任务。EXE 不依赖本机 Python，连接配置仍保存在当前 Windows 用户的加密文件中，不包含在 EXE 或仓库里。
 
 Windows Python 3.12 环境安装 `requirements.txt`，运行：
 

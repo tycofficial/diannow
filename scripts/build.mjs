@@ -10,4 +10,6 @@ await copyFile('.openai/hosting.json', 'dist/.openai/hosting.json');
 await mkdir('docs',{recursive:true});
 await writeFile('docs/index.html',page);
 await writeFile('docs/.nojekyll','');
+await writeFile('index.html',page);
+await writeFile('.nojekyll','');
 console.log('Built Worker ESM artifact.');
