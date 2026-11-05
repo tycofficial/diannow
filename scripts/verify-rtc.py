@@ -44,7 +44,7 @@ async def main():
         await asyncio.wait_for(ack.wait(),5)
         assert observations['video']['width']==agent.source_width and observations['video']['height']==agent.source_height
         assert any(item.type==1 and item.ki.wScan==1 and item.ki.dwFlags==8 for item in captured)
-        print(json.dumps({'rtcLoopbackVerified':True,**observations,'escAcknowledged':True,'virtualMicrophoneAvailable':bool(agent.mic_sink.device)}),flush=True)
+        print(json.dumps({'rtcLoopbackVerified':True,**observations,'escAcknowledged':True,'virtualMicrophoneAvailable':bool(agent.sessions[0].mic_sink.device)}),flush=True)
     finally:
         for task in tasks:task.cancel()
         print('Closing RTC verifier',flush=True);await client.close();print('Closing desktop source',flush=True);await agent.close();print('RTC verifier closed',flush=True)

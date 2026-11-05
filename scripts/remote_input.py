@@ -40,9 +40,9 @@ class RemoteInput:
     def __init__(self):
         self.events=queue.Queue(maxsize=512);self.buttons=set();self.pressed=set();self.running=True;self.error=None;self.enabled=False;self.on_result=None;self.move_sequence=0
         self.thread=threading.Thread(target=self.run,name='RemoteInput',daemon=True);self.thread.start()
-    def submit(self,event):
+    def submit(self,event,on_result=None):
         if not self.enabled or not isinstance(event,dict):return
-        try:self.events.put_nowait(event)
+        try:self.events.put_nowait((event,on_result or self.on_result))
         except queue.Full:self.release_all()
     def release_all(self):
         flags={0:4,1:64,2:16}
@@ -51,20 +51,20 @@ class RemoteInput:
         if self.pressed:emit([key(vk,True) for vk in list(self.pressed)])
         self.pressed.clear()
     def disable(self):
-        self.enabled=False
+        self.enabled=False;self.move_sequence=0;self.error=None
         while True:
             try:self.events.get_nowait()
             except queue.Empty:break
         self.release_all()
     def run(self):
         while self.running:
-            event=self.events.get()
+            event,on_result=self.events.get()
             try:
                 if self.enabled:self.apply(event);self.error=None
-                if self.on_result and event.get('id'):self.on_result(event['id'],None)
+                if on_result and event.get('id'):on_result(event['id'],None)
             except Exception as error:
                 self.error=str(error)
-                if self.on_result and event.get('id'):self.on_result(event['id'],self.error)
+                if on_result and event.get('id'):on_result(event['id'],self.error)
     def tap(self,vk,modifiers=()):
         down=list(dict.fromkeys([*modifiers,vk]))
         emit([key(value) for value in down]);self.pressed.update(down)

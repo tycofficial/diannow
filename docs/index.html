@@ -4,10 +4,10 @@
 main,video{min-width:0;min-height:0}
 button,textarea{border-radius:0!important;box-shadow:none!important}
 header,footer,#stats{background:#1b1c1e}button,#keyboard{background:#2b2d30;border-color:#4b4d52}button[aria-pressed=true]{background:#53565c}nav{gap:4px}h1{font-weight:500}header{padding:8px 10px}#tools{gap:4px}#tools button{min-width:40px}textarea{min-height:40px}#notice{position:absolute;bottom:8px;left:12px;right:12px;pointer-events:none;text-align:center;font-size:12px;color:#eee;background:rgba(0,0,0,.72)}#notice:empty{display:none}
-</style></head><body>
+#qualitybar{padding:6px 10px;background:#1b1c1e;font-size:12px;display:flex;gap:8px;flex-wrap:wrap}select{font:inherit;color:#eee;background:#2b2d30;border:1px solid #555;border-radius:0;padding:5px}#qualityhint{color:#aaa}</style></head><body>
 <header><div><h1>远程电脑</h1><div id="status" class="status" role="status">正在连接</div></div><nav><button id="audio">声音</button><button id="fullscreen">全屏</button><button id="connect">重连</button></nav></header>
 <main><video id="screen" autoplay playsinline muted aria-label="远程电脑完整桌面，支持点击和拖动"></video><div id="overlay">正在建立视频连接…</div><div id="notice" role="status"></div></main>
-<div id="stats">接收 — fps · 网络往返 — ms · 视频缓冲 — ms</div>
+<div id="qualitybar"><label>清晰度 <select id="quality"><option value="auto">自动 · 优先60帧</option><option value="2160">4K · 待检测</option><option value="1080">高清1080P · 未测</option><option value="720">720P · 未测</option></select></label> <label>帧率 <select id="framerate"><option>60</option><option>30</option><option>120</option></select> fps</label><span id="qualityhint"></span></div><div id="stats">接收 — fps · 网络往返 — ms · 视频缓冲 — ms</div>
 <footer><div id="tools"><button id="keyboard">键盘</button><button id="microphone">麦克风</button><button id="escape">Esc</button><button data-mod="Control" aria-pressed="false">Ctrl</button><button data-mod="Alt" aria-pressed="false">Alt</button><button data-mod="Shift" aria-pressed="false">Shift</button><button data-mod="Meta" aria-pressed="false">Win</button><button id="right">右键</button><button id="more">更多</button><button id="stop">断开</button></div>
 <div id="keyboardbox"><textarea id="typing" aria-label="远程键盘输入" placeholder="在这里打字" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><p id="inputHint">轻点点击 · 单指滑动滚动 · 长按拖动</p></div>
 <div id="keys"></div></footer>
@@ -49,28 +49,34 @@ class TouchGestures {
 const video=document.getElementById('screen'),statusEl=document.getElementById('status'),overlay=document.getElementById('overlay'),statsEl=document.getElementById('stats'),typing=document.getElementById('typing');
 let pc,control,motion,sessionId,connected=false,intentional=false,connecting=false,previousStats=null,lastFrame=0,pingRtt=0,sourceFps=0,held=new Set(),pointers=new Map(),mouseDown=false,lastY=0,composing=false,lastPoint={x:.5,y:.5},pendingMove=null,autoRetry,recoveryTimer;
 let touchGestures,pendingWheel=null,remoteStream,microphoneSender,microphoneStream,microphoneReady=false,desktopAudioAvailable=false,inputId=0,moveSequence=0,noticeTimer;
+const qualitySelect=document.getElementById('quality'),fpsSelect=document.getElementById('framerate');
+let activeQuality='720',sourceHeight=0,sourceRefresh=60,qualitySamples={},sampleStart=0,autoTried=false,connectionDeadline;
+function updateQualityLabels(){for(const option of qualitySelect.options){if(option.value==='auto')continue;const h=Number(option.value),v=qualitySamples[h];option.disabled=Boolean(sourceHeight&&h>sourceHeight);option.textContent=(h===2160?'4K':h===1080?'高清1080P':'720P')+' · '+(option.disabled?'源屏幕不支持':v?('平均 '+(v.total/v.seconds).toFixed(1)+' fps'):'未测');}for(const option of fpsSelect.options)option.disabled=Number(option.value)>sourceRefresh;}
+function applyQuality(){activeQuality=qualitySelect.value==='auto'?'720':qualitySelect.value;autoTried=false;sampleStart=Date.now();send({type:'settings',quality:activeQuality,fps:Number(fpsSelect.value)});document.getElementById('qualityhint').textContent=qualitySelect.value==='auto'?'优先60帧，稳定后尝试更高清晰度':'';}
+qualitySelect.onchange=applyQuality;fpsSelect.onchange=()=>{if(qualitySelect.value==='auto')qualitySelect.value=activeQuality;applyQuality()};
+function recordQuality(frames,elapsed){if(elapsed<=0||Date.now()-sampleStart<2000)return;const actual=video.videoHeight>=2000?'2160':video.videoHeight>=1000?'1080':'720';const v=qualitySamples[actual]||(qualitySamples[actual]={total:0,seconds:0});v.total+=Math.max(0,frames)*elapsed;v.seconds+=elapsed;updateQualityLabels();if(qualitySelect.value==='auto'&&v.seconds>=8&&actual===activeQuality){const average=v.total/v.seconds;if(average>=55&&!autoTried&&sourceHeight>=1080&&activeQuality==='720'){autoTried=true;activeQuality='1080';sampleStart=Date.now();send({type:'settings',quality:activeQuality,fps:60});}else if(average<50&&activeQuality!=='720'){activeQuality='720';sampleStart=Date.now();send({type:'settings',quality:'720',fps:60});document.getElementById('qualityhint').textContent='已选择更流畅的720P';}}}
 function notice(message){document.getElementById('notice').textContent=message;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>document.getElementById('notice').textContent='',4500)}
 const iceServers=[{urls:'stun:stun.cloudflare.com:3478'}];
 const signalingOrigin=location.hostname.endsWith('.github.io')?'https://desktop-live-tianw-1105.tyc130923.chatgpt.site':'';
-function api(path,options={}){return fetch(signalingOrigin+path,{...options,credentials:'omit',referrerPolicy:'no-referrer'})}
+function api(path,options={}){return fetch(signalingOrigin+path,{signal:AbortSignal.timeout(20000),...options,credentials:'omit',referrerPolicy:'no-referrer'})}
 function send(event,fast=false){const channel=fast?motion:control;if(event.type==='move')event.seq=++moveSequence;if(['key','text'].includes(event.type))event.id=++inputId;if(channel&&channel.readyState==='open'&&channel.bufferedAmount<65536){channel.send(JSON.stringify(event));return true}return false}
 function release(){touchGestures?.cancel();if(mouseDown){send({type:'button',button:0,down:false});mouseDown=false}pointers.clear();pendingMove=null;pendingWheel=null;send({type:'release'})}
 function clearModifiers(){held.clear();document.querySelectorAll('[data-mod]').forEach(button=>button.setAttribute('aria-pressed','false'))}
 function key(name,modifiers=name==='Escape'?[]:[...held]){if(!send({type:'key',key:name,modifiers}))notice('输入通道尚未连接');clearModifiers()}
 function text(value){if([...held].some(mod=>['Control','Alt','Meta'].includes(mod))&&/^[a-z0-9]+$/i.test(value)){for(const char of value)key(char)}else send({type:'text',text:held.has('Shift')?value.replace(/[a-z]/g,char=>char.toUpperCase()):value})}
-async function closeConnection(){clearTimeout(recoveryTimer);release();connected=false;if(microphoneStream){microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null}document.getElementById('microphone').setAttribute('aria-pressed','false');if(pc){const old=pc;pc=null;await old.close()}video.srcObject=null;remoteStream=null;previousStats=null}
-function bindChannel(channel){channel.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==='pong'){pingRtt=performance.now()-value.time;sourceFps=value.fps;microphoneReady=Boolean(value.microphoneReady);desktopAudioAvailable=Boolean(value.audio);if(value.inputError)notice(value.inputError)}else if(value.type==='inputAck'&&value.error)notice(value.error)}catch{}}}
+async function closeConnection(){clearTimeout(connectionDeadline);clearTimeout(recoveryTimer);release();connected=false;if(microphoneStream){microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null}document.getElementById('microphone').setAttribute('aria-pressed','false');if(pc){const old=pc;pc=null;await old.close()}video.srcObject=null;remoteStream=null;previousStats=null}
+function bindChannel(channel){channel.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==='pong'){pingRtt=performance.now()-value.time;sourceFps=value.fps;sourceHeight=value.source?.height||sourceHeight;sourceRefresh=value.source?.refresh||60;updateQualityLabels();microphoneReady=Boolean(value.microphoneReady);desktopAudioAvailable=Boolean(value.audio);if(value.inputError)notice(value.inputError)}else if(value.type==='inputAck'&&value.error)notice(value.error)}catch{}}}
 async function connect(){
  if(connecting)return;connecting=true;intentional=false;clearTimeout(autoRetry);await closeConnection();overlay.textContent='正在建立加密视频连接…';statusEl.textContent='正在连接电脑…';
  try{
-  pc=new RTCPeerConnection({iceServers,bundlePolicy:'max-bundle'});const active=pc;
+  pc=new RTCPeerConnection({iceServers,bundlePolicy:'max-bundle'});const active=pc;connectionDeadline=setTimeout(()=>{if(pc===active&&!connected&&!intentional){connecting=false;closeConnection();statusEl.textContent='连接超时，正在重试';autoRetry=setTimeout(connect,3000)}},30000);
   control=pc.createDataChannel('input',{ordered:true});motion=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});bindChannel(control);bindChannel(motion);
   pc.addTransceiver('video',{direction:'recvonly'});
   microphoneSender=pc.addTransceiver('audio',{direction:'sendrecv'}).sender;remoteStream=new MediaStream();video.srcObject=remoteStream;
   pc.ontrack=event=>{remoteStream.addTrack(event.track);video.play().catch(()=>{});try{event.receiver.jitterBufferTarget=event.track.kind==='video'?60:40}catch{};try{event.receiver.playoutDelayHint=.05}catch{}};
   pc.onconnectionstatechange=()=>{
    if(pc!==active)return;const state=active.connectionState;connected=state==='connected';
-   if(connected){clearTimeout(recoveryTimer);clearTimeout(autoRetry);statusEl.textContent='已连接 · 原始分辨率';overlay.textContent='';connecting=false;send({type:'release'})}
+   if(connected){clearTimeout(connectionDeadline);sampleStart=Date.now();clearTimeout(recoveryTimer);clearTimeout(autoRetry);lastFrame=Date.now();statusEl.textContent='已连接 · 原始分辨率';overlay.textContent='';connecting=false;send({type:'release'})}
    else if(state==='disconnected'){
     release();statusEl.textContent='网络短时波动，正在恢复';
     clearTimeout(recoveryTimer);recoveryTimer=setTimeout(()=>{if(pc===active&&active.connectionState==='disconnected'&&!intentional){connecting=false;connect()}},12000);
@@ -82,7 +88,7 @@ async function connect(){
   await pc.setLocalDescription(await pc.createOffer());
   await Promise.race([new Promise(resolve=>{if(active.iceGatheringState==='complete')resolve();else active.addEventListener('icegatheringstatechange',()=>{if(active.iceGatheringState==='complete')resolve()})}),new Promise(resolve=>setTimeout(resolve,5000))]);
   const offer=active.localDescription;
-  const response=await api('/api/offer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sdp:offer.sdp,type:offer.type})});
+  const response=await api('/api/offer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sdp:offer.sdp,type:offer.type,preferences:{quality:qualitySelect.value==='auto'?'720':qualitySelect.value,fps:Number(fpsSelect.value)}})});
   if(!response.ok)throw new Error('建立连接失败：HTTP '+response.status);
   const result=await response.json();
   if(result.sdp){await active.setRemoteDescription(result)}else{
@@ -95,8 +101,8 @@ async function connect(){
    }
    if(!answered)throw new Error('电脑端未响应，请确认连接程序正在运行');
   }
-  setTimeout(()=>{if(pc===active&&!connected&&!intentional){overlay.textContent='网络直连尚未成功。可重试；受限网络需要中继服务。';statusEl.textContent='等待网络连通';connecting=false}},18000);
- }catch(error){statusEl.textContent='连接失败';overlay.textContent=error.message;connecting=false}
+  setTimeout(()=>{if(pc===active&&!connected&&!intentional){overlay.textContent='网络直连尚未成功。可重试；受限网络需要中继服务。';statusEl.textContent='网络连接超时，正在重试';connecting=false;autoRetry=setTimeout(connect,3000)}},18000);
+ }catch(error){statusEl.textContent='连接失败，正在重试';overlay.textContent=error.message;connecting=false;if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,5000)}}
 }
 function point(event){const bounds=video.getBoundingClientRect(),vw=video.videoWidth||1280,vh=video.videoHeight||720,scale=Math.min(bounds.width/vw,bounds.height/vh),w=vw*scale,h=vh*scale;return{x:Math.max(0,Math.min(1,(event.clientX-bounds.left-(bounds.width-w)/2)/w)),y:Math.max(0,Math.min(1,(event.clientY-bounds.top-(bounds.height-h)/2)/h))}}
 touchGestures=new TouchGestures({point,emit:event=>{if(event.type==='wheel'){pendingWheel={...event,delta:Math.max(-1200,Math.min(1200,(pendingWheel?.delta||0)+event.delta))}}else send(event)}});
@@ -133,9 +139,9 @@ document.getElementById('fullscreen').onclick=async()=>{try{if(document.fullscre
 document.getElementById('connect').onclick=connect;document.getElementById('stop').onclick=async()=>{intentional=true;clearTimeout(autoRetry);send({type:'disconnect'});await closeConnection();connecting=false;overlay.textContent='连接已断开';statusEl.textContent='已断开 · 重新连接可恢复'};
 setInterval(async()=>{
  if(!pc||!connected)return;send({type:'ping',time:performance.now()},true);
- try{const report=await pc.getStats();let inbound,pair;report.forEach(value=>{if(value.type==='inbound-rtp'&&value.kind==='video')inbound=value;if(value.type==='candidate-pair'&&value.state==='succeeded'&&value.nominated)pair=value});if(!inbound)return;
+ try{const report=await pc.getStats();let inbound,pair;report.forEach(value=>{if(value.type==='inbound-rtp'&&value.kind==='video')inbound=value;if(value.type==='candidate-pair'&&value.state==='succeeded'&&value.nominated)pair=value});if(lastFrame&&Date.now()-lastFrame>15000&&!document.hidden){connecting=false;connect();return}if(!inbound)return;
   if(previousStats){const elapsed=(inbound.timestamp-previousStats.timestamp)/1000,frames=(inbound.framesDecoded-previousStats.framesDecoded)/elapsed;const emitted=(inbound.jitterBufferEmittedCount||0)-(previousStats.jitterBufferEmittedCount||0),buffer=emitted>0?1000*((inbound.jitterBufferDelay||0)-(previousStats.jitterBufferDelay||0))/emitted:0;const rtt=pair&&pair.currentRoundTripTime?pair.currentRoundTripTime*1000:pingRtt;const mbps=8*(inbound.bytesReceived-previousStats.bytesReceived)/elapsed/1e6;
-   statsEl.textContent=(video.videoWidth?video.videoWidth+' × '+video.videoHeight+' · ':'')+'接收 '+Math.max(0,frames).toFixed(0)+' fps · 往返 '+rtt.toFixed(0)+' ms · 缓冲 '+buffer.toFixed(0)+' ms · '+mbps.toFixed(1)+' Mbps';if(frames>0){lastFrame=Date.now();overlay.textContent=''}if(lastFrame&&Date.now()-lastFrame>7000){overlay.textContent='视频暂时中断，正在恢复…'}
+   recordQuality(frames,elapsed);statsEl.textContent=(video.videoWidth?video.videoWidth+' × '+video.videoHeight+' · ':'')+'接收 '+Math.max(0,frames).toFixed(0)+' fps · 往返 '+rtt.toFixed(0)+' ms · 缓冲 '+buffer.toFixed(0)+' ms · '+mbps.toFixed(1)+' Mbps';if(frames>0){lastFrame=Date.now();overlay.textContent=''}if(lastFrame&&Date.now()-lastFrame>7000){overlay.textContent='视频暂时中断，正在恢复…'}
   }previousStats=inbound;
  }catch{}
 },1000);

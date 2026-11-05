@@ -11,6 +11,8 @@ async function matchesHash(value, expected) {
   return difference===0;
 }
 
+async function storageRead(bucket,key){for(let attempt=0;;attempt++){try{return await bucket.get(key)}catch(error){if(attempt>=2)throw error;await new Promise(resolve=>setTimeout(resolve,150*(attempt+1)));}}}
+
 export default {
   async fetch(request, env) {
     const url=new URL(request.url),path=url.pathname,origin=request.headers.get('origin');
@@ -36,7 +38,7 @@ export default {
       return json({id});
     }
     if(path==='/api/agent/poll'&&request.method==='GET'){
-      const object=await env.BUCKET.get('rtc/pending');if(!object)return json({});
+      const object=await storageRead(env.BUCKET,'rtc/pending');if(!object)return json({});
       const pending=await object.json();return json(Date.now()-pending.createdAt<60000?pending:{});
     }
     if(path.startsWith('/api/answer/')){
@@ -48,7 +50,7 @@ export default {
         await env.BUCKET.put('rtc/answer/'+id,JSON.stringify({...answer,createdAt:Date.now()}),{httpMetadata:{contentType:'application/json'}});return json({ok:true});
       }
       if(request.method==='GET'){
-        const object=await env.BUCKET.get('rtc/answer/'+id);if(!object)return new Response(null,{status:204,headers});
+        const object=await storageRead(env.BUCKET,'rtc/answer/'+id);if(!object)return new Response(null,{status:204,headers});
         const answer=await object.json();if(Date.now()-answer.createdAt>60000)return new Response(null,{status:204,headers});
         return json({sdp:answer.sdp,type:answer.type});
       }

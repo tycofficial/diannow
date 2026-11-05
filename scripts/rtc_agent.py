@@ -83,24 +83,17 @@ class DesktopTrack(VideoStreamTrack):
         self.last_delivery=time.perf_counter();return frame
     def stop(self):super().stop();self.capture_pool.shutdown(wait=False,cancel_futures=True)
 
-class DesktopAgent:
-    def __init__(self):
-        self.camera=dxcam.create(output_color='BGRA',max_buffer_len=2,processor_backend='numpy')
-        self.input=RemoteInput();self.pc=None;self.track=None;self.audio_track=None;self.mic_sink=None;self.mic_task=None;self.session=None;self.closed=False;self.audio_error=None
-        self.source_width=ctypes.windll.user32.GetSystemMetrics(0);self.source_height=ctypes.windll.user32.GetSystemMetrics(1)
-        ctypes.windll.user32.GetDC.restype=ctypes.c_void_p
-        screen_dc=ctypes.windll.user32.GetDC(None)
-        ctypes.windll.gdi32.GetDeviceCaps.argtypes=[ctypes.c_void_p,ctypes.c_int]
-        self.refresh=max(30,min(240,ctypes.windll.gdi32.GetDeviceCaps(screen_dc,116) or 60))
-        ctypes.windll.user32.ReleaseDC.argtypes=[ctypes.c_void_p,ctypes.c_void_p]
-        ctypes.windll.user32.ReleaseDC(None,screen_dc)
+class DesktopSession:
+    def __init__(self,owner):
+        self.owner=owner;self.camera=owner.camera;self.input=owner.input
+        self.source_width=owner.source_width;self.source_height=owner.source_height;self.refresh=owner.refresh
+        self.pc=None;self.track=None;self.audio_track=None;self.mic_sink=None;self.mic_task=None;self.closed=False;self.audio_error=None;self.move_sequence=0
     async def answer(self,offer):
-        await self.disconnect()
         preferences=offer.get('preferences',{})
         fps=max(15,min(120,self.refresh,int(preferences.get('fps',60))))
         width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(preferences.get('quality')),self.source_width))
         height=max(2,round(self.source_height*width/self.source_width)//2*2);width=width//2*2
-        self.camera.start(target_fps=fps,video_mode=True)
+        if not self.camera.is_capturing:self.camera.start(target_fps=min(120,self.refresh),video_mode=True)
         self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(urls='stun:stun.cloudflare.com:3478')]))
         self.track=track=DesktopTrack(self.camera,width,height,fps);pc.addTrack(track)
         if 'm=audio' in offer.get('sdp',''):
@@ -119,31 +112,43 @@ class DesktopAgent:
                 def reply():
                     if channel.readyState=='open':channel.send(json.dumps({'type':'inputAck','id':identifier,'error':error}))
                 loop.call_soon_threadsafe(reply)
-            if channel.label=='input':self.input.on_result=input_result
             @channel.on('message')
             def on_message(message):
                 try:
                     event=json.loads(message)
                     if event.get('type')=='ping':
                         channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':round(track.sent/max(.01,time.perf_counter()-(track.first or time.perf_counter())),1),'inputError':self.input.error,'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':width,'height':height,'fps':fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'microphoneReady':bool(self.mic_sink and self.mic_sink.device)}))
-                    elif event.get('type')=='disconnect':asyncio.create_task(self.disconnect())
-                    else:self.input.submit(event)
+                    elif event.get('type')=='settings':
+                        target_width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(event.get('quality')),self.source_width))//2*2
+                        track.width=target_width;track.height=max(2,round(self.source_height*target_width/self.source_width)//2*2)
+                        track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.delivery=DeliveryPolicy(track.fps)
+                    elif event.get('type')=='disconnect':asyncio.create_task(self.close())
+                    else:
+                        if event.get('type')=='move' and event.get('seq'):
+                            if event['seq']<=self.move_sequence:return
+                            self.move_sequence=event.pop('seq')
+                        self.input.submit(event,input_result)
                 except Exception:pass
             @channel.on('close')
             def on_close():self.input.release_all()
         @pc.on('connectionstatechange')
         async def on_state():
             print(json.dumps({'connection':pc.connectionState}),flush=True)
-            if pc.connectionState=='connected':self.input.enabled=True
-            if pc.connectionState in ['disconnected','failed','closed']:self.input.disable()
+            self.owner.update_input_state()
+            if pc.connectionState in ['failed','closed']:asyncio.create_task(self.close())
+        async def expire_unconnected():
+            await asyncio.sleep(35)
+            if not self.closed and pc.connectionState!='connected':await self.close()
+        asyncio.create_task(expire_unconnected())
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer['sdp'],type=offer['type']))
         await pc.setLocalDescription(await pc.createAnswer())
         return {'sdp':pc.localDescription.sdp,'type':pc.localDescription.type}
-    async def disconnect(self):
+    async def close(self):
+        if self.closed:return
+        self.closed=True
         def debug(stage):
             if os.environ.get('DESKTOP_RTC_DEBUG'):print(json.dumps({'disconnectStage':stage}),flush=True)
         debug('start')
-        self.input.disable()
         if self.mic_task:self.mic_task.cancel();self.mic_task=None
         if self.mic_sink:self.mic_sink.close();self.mic_sink=None
         if self.audio_track:self.audio_track.stop();self.audio_track=None
@@ -152,10 +157,37 @@ class DesktopAgent:
         debug('track-stopped')
         if self.pc:pc=self.pc;self.pc=None;await pc.close()
         debug('peer-closed')
-        if self.camera.is_capturing:self.camera.stop()
-        debug('capture-stopped')
+        if self in self.owner.sessions:self.owner.sessions.remove(self)
+        self.owner.update_input_state()
+        if not self.owner.sessions and self.camera.is_capturing:self.camera.stop()
+        debug('session-stopped')
+
+class DesktopAgent:
+    def __init__(self):
+        self.camera=dxcam.create(output_color='BGRA',max_buffer_len=2,processor_backend='numpy')
+        self.input=RemoteInput();self.sessions=[];self.closed=False
+        self.source_width=ctypes.windll.user32.GetSystemMetrics(0);self.source_height=ctypes.windll.user32.GetSystemMetrics(1)
+        ctypes.windll.user32.GetDC.restype=ctypes.c_void_p
+        screen_dc=ctypes.windll.user32.GetDC(None)
+        ctypes.windll.gdi32.GetDeviceCaps.argtypes=[ctypes.c_void_p,ctypes.c_int]
+        self.refresh=max(30,min(240,ctypes.windll.gdi32.GetDeviceCaps(screen_dc,116) or 60))
+        ctypes.windll.user32.ReleaseDC.argtypes=[ctypes.c_void_p,ctypes.c_void_p]
+        ctypes.windll.user32.ReleaseDC(None,screen_dc)
+    def update_input_state(self):
+        if any(session.pc and session.pc.connectionState=='connected' for session in self.sessions):self.input.enabled=True
+        else:self.input.disable()
+    async def answer(self,offer):
+        for session in list(self.sessions):
+            if session.pc and session.pc.connectionState in ['closed','failed']:await session.close()
+        if len(self.sessions)>=4:raise RuntimeError('Too many active desktop viewers. Close an unused viewer and retry.')
+        session=DesktopSession(self);self.sessions.append(session)
+        try:return await session.answer(offer)
+        except BaseException:
+            await session.close();raise
     async def close(self):
-        self.closed=True;await self.disconnect();self.camera.stop();self.camera.release()
+        self.closed=True
+        for session in list(self.sessions):await session.close()
+        self.input.disable();self.camera.stop();self.camera.release()
 
 async def main():
     agent=DesktopAgent()
@@ -179,8 +211,7 @@ async def main():
             if token:auth_headers['OAI-Sites-Authorization']='Bearer '+token
             if agent_key:auth_headers['X-Agent-Key']=agent_key
             async with aiohttp.ClientSession(headers=auth_headers,timeout=timeout,trust_env=True,cookie_jar=aiohttp.DummyCookieJar()) as session:
-                end=time.monotonic()+8*60*60
-                while time.monotonic()<end:
+                while not agent.closed:
                     try:
                         async with session.get(url+'/api/agent/poll') as response:
                             if response.status!=200:raise RuntimeError('Private Site authorization: HTTP '+str(response.status))
@@ -188,10 +219,11 @@ async def main():
                         if not getattr(agent,'service_authenticated',False):
                             agent.service_authenticated=True;print(json.dumps({'serviceAuthenticated':True,'waitingForViewer':True}),flush=True)
                         if pending.get('id') and pending['id']!=seen and time.time()*1000-pending.get('createdAt',0)<60000:
-                            seen=pending['id'];answer=await agent.answer(pending['offer'])
-                            async with session.post(url+'/api/answer/'+seen,json=answer) as response:
+                            answer=await asyncio.wait_for(agent.answer(pending['offer']),20)
+                            async with session.post(url+'/api/answer/'+pending['id'],json=answer) as response:
                                 if response.status!=200:raise RuntimeError('Could not publish WebRTC answer.')
-                            print(json.dumps({'sessionReady':seen}),flush=True)
+                            print(json.dumps({'sessionReady':pending['id']}),flush=True)
+                            seen=pending['id']
                         await asyncio.sleep(.4)
                     except Exception as error:
                         print(str(error),flush=True);await asyncio.sleep(2)
