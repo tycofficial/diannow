@@ -43,6 +43,8 @@ python scripts/rtc_agent.py
 
 ## GitHub Pages
 
+仓库根目录与 `/docs` 都生成 `index.html` 和 `.nojekyll`，主地址直接显示远程桌面界面，避免将 README 渲染成首页。
+
 在仓库 Settings → Pages 中选择 **Deploy from a branch**、**main**、**/docs** 并保存。此后同步 `docs` 的提交会自动更新页面。
 
 GitHub Pages 托管浏览器页面，Site Worker 提供连接信令，Windows 程序采集桌面并执行输入。音视频通过 WebRTC 传输。受限网络可能需要配置 TURN 中继；普通浏览器和标准权限进程无法操作 Windows 安全桌面或部分管理员窗口。
