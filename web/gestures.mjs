@@ -1,5 +1,5 @@
 export class TouchGestures {
-  constructor({emit,point,setTimer=setTimeout,clearTimer=clearTimeout}){this.emit=emit;this.point=point;this.setTimer=setTimer;this.clearTimer=clearTimer;this.pointers=new Map();this.gesture=null;this.timer=null}
+  constructor({emit,point,setTimer=(callback,delay)=>setTimeout(callback,delay),clearTimer=timer=>clearTimeout(timer)}){this.emit=emit;this.point=point;this.setTimer=setTimer;this.clearTimer=clearTimer;this.pointers=new Map();this.gesture=null;this.timer=null}
   down(event){
     this.pointers.set(event.pointerId,event);
     if(this.pointers.size===1){
