@@ -1,0 +1,5 @@
+aiortc==1.15.0
+av==17.1.0
+dxcam==0.3.0
+aiohttp==3.14.5
+PyAudioWPatch==0.2.12.9

@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {TouchGestures} from '../web/gestures.mjs';
+const events=[];let hold;
+const gestures=new TouchGestures({emit:event=>events.push(event),point:event=>({x:event.clientX/100,y:event.clientY/100}),setTimer:callback=>(hold=callback),clearTimer:()=>hold=null});
+const event=(x,y,id=1)=>({clientX:x,clientY:y,pointerId:id});
+gestures.down(event(30,40));gestures.up(event(30,40));
+assert.deepEqual(events.filter(event=>event.type==='button').map(event=>event.down),[true,false]);
+events.length=0;gestures.down(event(30,40));gestures.move(event(30,80));gestures.up(event(30,80));
+assert(events.some(event=>event.type==='wheel'&&event.delta>0));assert(!events.some(event=>event.type==='button'));
+events.length=0;gestures.down(event(20,20));hold();gestures.move(event(60,70));gestures.up(event(60,70));
+assert.deepEqual(events.filter(event=>event.type==='button').map(event=>event.down),[true,false]);assert(!events.some(event=>event.type==='wheel'));
+events.length=0;gestures.down(event(20,20));gestures.down(event(80,20,2));gestures.move(event(20,50));gestures.up(event(20,50));gestures.up(event(80,20,2));
+assert(events.some(event=>event.type==='wheel'));assert(!events.some(event=>event.type==='button'));
+console.log('Gesture checks passed: tap, single-finger scroll, long-press drag and two-finger scroll.');
