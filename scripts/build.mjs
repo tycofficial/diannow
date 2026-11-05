@@ -4,7 +4,7 @@ await mkdir('dist/.openai', { recursive: true });
 const source = await readFile('worker/index.js', 'utf8');
 const gestures=(await readFile('web/gestures.mjs','utf8')).replace('export class','class');
 const page = (await readFile('web/viewer.html', 'utf8')).replace('//__GESTURES__',gestures);
-new (await import('node:vm')).Script(page.match(/<script>([\s\S]*?)<\/script>/)[1]);
+for(const match of page.matchAll(/<script>([\s\S]*?)<\/script>/g))new (await import('node:vm')).Script(match[1]);
 await writeFile('dist/server/index.js', source.replace('"__VIEWER_HTML__"', JSON.stringify(page)));
 await copyFile('.openai/hosting.json', 'dist/.openai/hosting.json');
 await mkdir('docs',{recursive:true});

@@ -25,6 +25,13 @@ export default {
     if(path.startsWith('/s/')&&request.method==='GET')return Response.redirect(url.origin+'/',302);
     if(!path.startsWith('/api/'))return json({error:'Not found'},404);
     if(origin&&!allowedOrigins.has(origin))return json({error:'Origin is not allowed.'},403);
+    if(path==='/api/client-report'&&request.method==='POST'){
+      const raw=await request.text();if(raw.length>2000)return json({error:'Report too large'},413);
+      let value;try{value=JSON.parse(raw)}catch{return json({error:'Invalid report'},400)}
+      if(!['boot','ready','connecting','offer-created','offer-sent','answer-received','connected','startup-error','connection-error'].includes(value.stage))return json({error:'Invalid stage'},400);
+      console.error('viewer-diagnostic',JSON.stringify({stage:value.stage,error:String(value.error||'').slice(0,300),rtc:String(value.rtc||'').slice(0,20),secure:!!value.secure,embedded:!!value.embedded}));
+      return new Response(null,{status:204,headers});
+    }
     if(!env.BUCKET)return json({error:'Signaling storage is not ready.'},503);
     const isAgentOperation=path==='/api/agent/poll'||(path.startsWith('/api/answer/')&&request.method!=='GET');
     if(isAgentOperation&&!await matchesHash(request.headers.get('x-agent-key'),env.AGENT_KEY_SHA256))return json({error:'Agent authorization failed.'},403);

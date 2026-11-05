@@ -12,6 +12,23 @@ header,footer,#stats{background:#1b1c1e}button,#keyboard{background:#2b2d30;bord
 <div id="keyboardbox"><textarea id="typing" aria-label="远程键盘输入" placeholder="在这里打字" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea><p id="inputHint">轻点点击 · 单指滑动滚动 · 长按拖动</p></div>
 <div id="keys"></div></footer>
 <script>
+(function(){
+  var stage='boot',origin=location.hostname.indexOf('.github.io')!==-1?'https://desktop-live-tianw-1105.tyc130923.chatgpt.site':'';
+  function report(next,message){
+    stage=next;
+    try{var xhr=new XMLHttpRequest();xhr.open('POST',origin+'/api/client-report',true);xhr.setRequestHeader('Content-Type','application/json');xhr.timeout=5000;xhr.send(JSON.stringify({stage:next,error:String(message||'').slice(0,300),rtc:typeof window.RTCPeerConnection,secure:window.isSecureContext,embedded:window.self!==window.top}));}catch(ignore){}
+  }
+  function fail(message){var overlay=document.getElementById('overlay'),status=document.getElementById('status');if(status)status.textContent='页面无法启动';if(overlay)overlay.textContent='连接程序未启动：'+message;report('startup-error',message);}
+  window.desktopBoot={stage:report,fail:fail};
+  window.addEventListener('error',function(event){if(event.message)fail(event.message);});
+  window.addEventListener('unhandledrejection',function(event){fail(event.reason&&event.reason.message||String(event.reason));});
+  report('boot');
+  setTimeout(function(){if(stage==='boot')fail('浏览器未执行连接程序，请重新载入页面');},5000);
+})();
+</script>
+<script>
+(function(){
+try{
 //__GESTURES__
 const video=document.getElementById('screen'),statusEl=document.getElementById('status'),overlay=document.getElementById('overlay'),statsEl=document.getElementById('stats'),typing=document.getElementById('typing');
 let pc,control,motion,sessionId,connected=false,intentional=false,connecting=false,previousStats=null,lastFrame=0,pingRtt=0,sourceFps=0,held=new Set(),pointers=new Map(),mouseDown=false,lastY=0,composing=false,lastPoint={x:.5,y:.5},pendingMove=null,autoRetry,recoveryTimer;
@@ -25,7 +42,7 @@ function recordQuality(frames,elapsed){if(elapsed<=0||Date.now()-sampleStart<200
 function notice(message){document.getElementById('notice').textContent=message;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>document.getElementById('notice').textContent='',4500)}
 const iceServers=[{urls:'stun:stun.cloudflare.com:3478'}];
 const signalingOrigin=location.hostname.endsWith('.github.io')?'https://desktop-live-tianw-1105.tyc130923.chatgpt.site':'';
-function api(path,options={}){return fetch(signalingOrigin+path,{signal:AbortSignal.timeout(20000),...options,credentials:'omit',referrerPolicy:'no-referrer'})}
+async function api(path,options={}){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);try{return await fetch(signalingOrigin+path,{...options,signal:controller.signal,credentials:'omit',referrerPolicy:'no-referrer'})}finally{clearTimeout(timer)}}
 function send(event,fast=false){const channel=fast?motion:control;if(event.type==='move')event.seq=++moveSequence;if(['key','text'].includes(event.type))event.id=++inputId;if(channel&&channel.readyState==='open'&&channel.bufferedAmount<65536){channel.send(JSON.stringify(event));return true}return false}
 function release(){touchGestures?.cancel();if(mouseDown){send({type:'button',button:0,down:false});mouseDown=false}pointers.clear();pendingMove=null;pendingWheel=null;send({type:'release'})}
 function clearModifiers(){held.clear();document.querySelectorAll('[data-mod]').forEach(button=>button.setAttribute('aria-pressed','false'))}
@@ -34,8 +51,10 @@ function text(value){if([...held].some(mod=>['Control','Alt','Meta'].includes(mo
 async function closeConnection(){clearTimeout(connectionDeadline);clearTimeout(recoveryTimer);release();connected=false;if(microphoneStream){microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null}document.getElementById('microphone').setAttribute('aria-pressed','false');if(pc){const old=pc;pc=null;await old.close()}video.srcObject=null;remoteStream=null;previousStats=null}
 function bindChannel(channel){channel.onmessage=event=>{try{const value=JSON.parse(event.data);if(value.type==='pong'){pingRtt=performance.now()-value.time;sourceFps=value.fps;sourceHeight=value.source?.height||sourceHeight;sourceRefresh=value.source?.refresh||60;updateQualityLabels();microphoneReady=Boolean(value.microphoneReady);desktopAudioAvailable=Boolean(value.audio);if(value.inputError)notice(value.inputError)}else if(value.type==='inputAck'&&value.error)notice(value.error)}catch{}}}
 async function connect(){
- if(connecting)return;connecting=true;intentional=false;clearTimeout(autoRetry);await closeConnection();overlay.textContent='正在建立加密视频连接…';statusEl.textContent='正在连接电脑…';
+ if(connecting)return;connecting=true;intentional=false;clearTimeout(autoRetry);
  try{
+  await closeConnection();window.desktopBoot.stage('connecting');overlay.textContent='正在建立加密视频连接…';statusEl.textContent='正在连接电脑…';
+  if(typeof RTCPeerConnection!=='function')throw new Error('当前浏览器没有提供实时桌面所需的视频连接功能');
   pc=new RTCPeerConnection({iceServers,bundlePolicy:'max-bundle'});const active=pc;connectionDeadline=setTimeout(()=>{if(pc===active&&!connected&&!intentional){connecting=false;closeConnection();statusEl.textContent='连接超时，正在重试';autoRetry=setTimeout(connect,3000)}},30000);
   control=pc.createDataChannel('input',{ordered:true});motion=pc.createDataChannel('pointer',{ordered:false,maxRetransmits:0});bindChannel(control);bindChannel(motion);
   pc.addTransceiver('video',{direction:'recvonly'});
@@ -43,7 +62,7 @@ async function connect(){
   pc.ontrack=event=>{remoteStream.addTrack(event.track);video.play().catch(()=>{});try{event.receiver.jitterBufferTarget=event.track.kind==='video'?60:40}catch{};try{event.receiver.playoutDelayHint=.05}catch{}};
   pc.onconnectionstatechange=()=>{
    if(pc!==active)return;const state=active.connectionState;connected=state==='connected';
-   if(connected){clearTimeout(connectionDeadline);sampleStart=Date.now();clearTimeout(recoveryTimer);clearTimeout(autoRetry);lastFrame=Date.now();statusEl.textContent='已连接 · 原始分辨率';overlay.textContent='';connecting=false;send({type:'release'})}
+   if(connected){window.desktopBoot.stage('connected');clearTimeout(connectionDeadline);sampleStart=Date.now();clearTimeout(recoveryTimer);clearTimeout(autoRetry);lastFrame=Date.now();statusEl.textContent='已连接 · 原始分辨率';overlay.textContent='';connecting=false;send({type:'release'})}
    else if(state==='disconnected'){
     release();statusEl.textContent='网络短时波动，正在恢复';
     clearTimeout(recoveryTimer);recoveryTimer=setTimeout(()=>{if(pc===active&&active.connectionState==='disconnected'&&!intentional){connecting=false;connect()}},12000);
@@ -53,23 +72,25 @@ async function connect(){
    }
   };
   await pc.setLocalDescription(await pc.createOffer());
+  window.desktopBoot.stage('offer-created');
   await Promise.race([new Promise(resolve=>{if(active.iceGatheringState==='complete')resolve();else active.addEventListener('icegatheringstatechange',()=>{if(active.iceGatheringState==='complete')resolve()})}),new Promise(resolve=>setTimeout(resolve,5000))]);
   const offer=active.localDescription;
   const response=await api('/api/offer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sdp:offer.sdp,type:offer.type,preferences:{quality:qualitySelect.value==='auto'?'720':qualitySelect.value,fps:Number(fpsSelect.value)}})});
   if(!response.ok)throw new Error('建立连接失败：HTTP '+response.status);
   const result=await response.json();
+  window.desktopBoot.stage('offer-sent');
   if(result.sdp){await active.setRemoteDescription(result)}else{
    sessionId=result.id;const deadline=Date.now()+45000;let answered=false;
    while(Date.now()<deadline&&pc===active&&!intentional){
     const reply=await api('/api/answer/'+sessionId,{cache:'no-store'});
-    if(reply.status===200){await active.setRemoteDescription(await reply.json());answered=true;break}
+    if(reply.status===200){await active.setRemoteDescription(await reply.json());window.desktopBoot.stage('answer-received');answered=true;break}
     if(![204,404].includes(reply.status))throw new Error('电脑连接失败：HTTP '+reply.status);
     await new Promise(resolve=>setTimeout(resolve,350));
    }
    if(!answered)throw new Error('电脑端未响应，请确认连接程序正在运行');
   }
   setTimeout(()=>{if(pc===active&&!connected&&!intentional){overlay.textContent='网络直连尚未成功。可重试；受限网络需要中继服务。';statusEl.textContent='网络连接超时，正在重试';connecting=false;autoRetry=setTimeout(connect,3000)}},18000);
- }catch(error){statusEl.textContent='连接失败，正在重试';overlay.textContent=error.message;connecting=false;if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,5000)}}
+ }catch(error){window.desktopBoot.stage('connection-error',error.message);statusEl.textContent='连接失败，正在重试';overlay.textContent=error.message;connecting=false;if(!intentional){clearTimeout(autoRetry);autoRetry=setTimeout(connect,5000)}}
 }
 function point(event){const bounds=video.getBoundingClientRect(),vw=video.videoWidth||1280,vh=video.videoHeight||720,scale=Math.min(bounds.width/vw,bounds.height/vh),w=vw*scale,h=vh*scale;return{x:Math.max(0,Math.min(1,(event.clientX-bounds.left-(bounds.width-w)/2)/w)),y:Math.max(0,Math.min(1,(event.clientY-bounds.top-(bounds.height-h)/2)/h))}}
 touchGestures=new TouchGestures({point,emit:event=>{if(event.type==='wheel'){pendingWheel={...event,delta:Math.max(-1200,Math.min(1200,(pendingWheel?.delta||0)+event.delta))}}else send(event)}});
@@ -112,6 +133,8 @@ setInterval(async()=>{
   }previousStats=inbound;
  }catch{}
 },1000);
-connect();
+window.desktopBoot.stage('ready');connect();
 window.addEventListener('pageshow',event=>{if(event.persisted)location.reload()});
+}catch(error){window.desktopBoot.fail(error.message)}
+})();
 </script></body></html>
