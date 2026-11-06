@@ -197,7 +197,7 @@ function commandAck(value){
  desktopCommandAcks.delete(value.id);clearTimeout(pending.timer);
  if(value.error)pending.reject(new Error(value.error));else pending.resolve();
 }
-const restartCodexCommand='powershell.exe -NoProfile -WindowStyle Hidden -Command "$p=@(Get-Process -Name Codex -ErrorAction SilentlyContinue);$e=($p|Where-Object Path|Select-Object -First 1).Path;if($e){$p|Stop-Process -Force;Start-Sleep -Seconds 2;Start-Process -FilePath $e}"';
+const restartCodexCommand='powershell.exe -NoProfile -WindowStyle Hidden -Command "$p=@(Get-Process -Name Codex -ErrorAction SilentlyContinue);$e=($p|Where-Object MainWindowHandle -NE 0|Select-Object -First 1).Path;if($e){$p|Where-Object Path -EQ $e|Stop-Process -Force;Start-Sleep -Seconds 2;Start-Process -FilePath $e}"';
 async function runDesktopCommand(command){
  if(desktopCommandRunning){notice('正在执行上一项操作');return}
  if(!connected||control?.readyState!=='open'){notice('请等待操作通道连接');return}
