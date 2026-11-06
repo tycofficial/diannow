@@ -9,7 +9,7 @@ async def main():
     agent=DesktopAgent();client=RTCPeerConnection(RTCConfiguration(iceServers=[]));tasks=[];done=asyncio.Event();ack=asyncio.Event();observations={}
     channel=client.createDataChannel('input');client.createDataChannel('pointer',ordered=False,maxRetransmits=0)
     @channel.on('open')
-    def opened():channel.send(json.dumps({'type':'key','key':'Escape','id':42}))
+    def opened():channel.send(json.dumps({'type':'audioState','enabled':True}));channel.send(json.dumps({'type':'key','key':'Escape','id':42}))
     @channel.on('message')
     def message(data):
         value=json.loads(data)

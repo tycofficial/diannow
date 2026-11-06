@@ -21,6 +21,8 @@ from display_target import capture_target,displays,set_preference,activate_virtu
 from low_latency_rtp import configure_video_playout_delay
 from rtp_scheduling import install_cooperative_rtp_send
 from ice_consent import install_consent_window
+from turn_flow_control import install_turn_flow_control
+from turn_proxy import install_turn_proxy
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
@@ -99,7 +101,7 @@ class DeliveryPolicy:
 
 class FastH264Encoder(H264Encoder):
     @property
-    def target_bitrate(self):return getattr(self,'requested_bitrate',14000000)
+    def target_bitrate(self):return getattr(self,'requested_bitrate',2000000)
     @target_bitrate.setter
     def target_bitrate(self,value):
         self.requested_bitrate=max(350000,min(int(value),100000000))
@@ -114,12 +116,12 @@ class FastH264Encoder(H264Encoder):
             encoders=['h264_amf','libx264'] if frame.format.name=='bgra' and not getattr(self,'hardware_failed',False) else ['libx264']
             for encoder in encoders:
                 try:
-                    codec=av.CodecContext.create(encoder,'w');codec.width=frame.width;codec.height=frame.height;codec.pix_fmt='bgra' if encoder=='h264_amf' else 'yuv420p'
+                    codec=av.CodecContext.create(encoder,'w');codec.width=frame.width;codec.height=frame.height;codec.pix_fmt='bgra' if encoder=='h264_amf' else 'yuv420p';codec.bit_rate=self.target_bitrate
                     target_fps=metadata['fps']
                     codec.framerate=fractions.Fraction(int(target_fps));codec.time_base=fractions.Fraction(1,90000);codec.gop_size=120;codec.max_b_frames=0
                     if encoder=='libx264':codec.profile='Baseline'
                     level='6.0' if frame.width*frame.height*target_fps>3840*2160*60 else ('5.2' if frame.width*frame.height>1920*1080 else '4.2')
-                    codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cqp','qp_i':'16','qp_p':'16','profile':'constrained_baseline'} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'crf':'16','x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
+                    codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cbr','profile':'constrained_baseline'} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
                     codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic()
                     print(json.dumps({'encoder':encoder,'targetFps':target_fps,'sessionId':metadata.get('sessionId')}),flush=True);break
                 except Exception as error:
@@ -127,6 +129,7 @@ class FastH264Encoder(H264Encoder):
                     print(json.dumps({'encoderFallback':encoder,'reason':str(error)}),flush=True)
             if self.codec is None:raise RuntimeError('No H264 encoder is available.')
         if self.codec.pix_fmt!=frame.format.name:frame=frame.reformat(format=self.codec.pix_fmt,threads=4)
+        self.codec.bit_rate=self.target_bitrate
         started=time.perf_counter();packets=self.codec.encode(frame)
         self.encode_total=getattr(self,'encode_total',0)+(time.perf_counter()-started);self.encode_count=getattr(self,'encode_count',0)+1
         if self.encode_count%300==0:print(json.dumps({'encodeMs':round(1000*self.encode_total/self.encode_count,2),'sessionId':metadata.get('sessionId')}),flush=True)
@@ -369,7 +372,8 @@ class DesktopSession:
                     await self.owner.media_devices.call(audio.stop)
                     raise RuntimeError('Desktop session closed during audio setup.')
                 self.owner.media_devices.nonblocking_track_stop(audio);self.audio_track=audio
-                independent_media_sender(pc.addTrack(audio),cnames['audio']);self.audio_error=None
+                self.audio_sender=pc.addTrack(audio);self.audio_sender._enabled=False
+                independent_media_sender(self.audio_sender,cnames['audio']);self.audio_error=None
             except Exception as error:self.audio_error=str(error);print(json.dumps({'desktopAudioError':str(error)}),flush=True)
         if self.closed:raise RuntimeError('Desktop session closed during media setup.')
         try:
@@ -420,13 +424,18 @@ class DesktopSession:
                             print(json.dumps({'sessionId':self.session_id,'videoRecovery':'keyframe-requested'}),flush=True)
                     elif event.get('type')=='disconnect':asyncio.create_task(self.close('viewer-request'))
                     elif event.get('type')=='microphoneState':self.owner.audio_router.set_microphone(self.session_id,bool(event.get('enabled')))
+                    elif event.get('type')=='audioState' and getattr(self,'audio_sender',None):
+                        self.audio_sender._enabled=bool(event.get('enabled'))
+                        if getattr(self,'turn_flow',None):self.turn_flow['audioEnabled']=self.audio_sender._enabled
                     else:
                         if event.get('type')=='move' and event.get('seq'):
                             if event['seq']<=self.move_sequence:return
                             self.move_sequence=event.pop('seq')
                         event['_owner']=self.session_id
                         self.input.submit(event,input_result)
-                except Exception:pass
+                except Exception as error:
+                    print(json.dumps({'controlMessageError':type(error).__name__,'message':str(error)}),flush=True)
+                    input_result(None,str(error))
             @channel.on('close')
             def on_close():
                 try:self.input.release_owner(self.session_id)
@@ -450,9 +459,12 @@ class DesktopSession:
         self.watchdog=asyncio.create_task(expire_idle())
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer['sdp'],type=offer['type']))
         for transceiver in pc.getTransceivers():install_cooperative_rtp_send(transceiver.sender.transport)
+        for transceiver in pc.getTransceivers():
+            if transceiver.kind=='video':self.turn_flow=install_turn_flow_control(transceiver.sender.transport,[codec.payloadType for codec in transceiver._codecs],video_sender=transceiver.sender)
         playout=configure_video_playout_delay(pc,offer['sdp'],maximum_ms=150)
         print(json.dumps({'sessionId':self.session_id,'videoPlayoutDelay':playout}),flush=True)
         await pc.setLocalDescription(independent_media_description(await pc.createAnswer(),cnames))
+        if getattr(self,'audio_sender',None):self.audio_sender._enabled=False
         self.consent_state=install_consent_window(pc)
         return {'sdp':pc.localDescription.sdp,'type':pc.localDescription.type}
     async def close(self,reason='cleanup'):
@@ -562,7 +574,7 @@ async def run_agent():
             if token:auth_headers['OAI-Sites-Authorization']='Bearer '+token
             if agent_key:auth_headers['X-Agent-Key']=agent_key
             async with aiohttp.ClientSession(headers=auth_headers,timeout=timeout,trust_env=True,cookie_jar=aiohttp.DummyCookieJar()) as session:
-                heartbeat_at=0;ice_refresh=0;proxy=signaling_proxy()
+                heartbeat_at=0;ice_refresh=0;proxy=signaling_proxy();install_turn_proxy(proxy)
                 while not agent.closed:
                     if (DISPLAY_STATE/'engine-stop.request').exists():break
                     if time.monotonic()-heartbeat_at>=5:
@@ -570,6 +582,7 @@ async def run_agent():
                     phase='poll';started=time.monotonic()
                     try:
                         if time.monotonic()-ice_refresh>60:
+                            proxy=signaling_proxy() or proxy;install_turn_proxy(proxy)
                             ice_refresh=time.monotonic();phase='ice-config'
                             async with session.get(url+'/api/ice',proxy=proxy) as response:
                                 if response.status==200:
@@ -596,7 +609,8 @@ async def run_agent():
                         await asyncio.sleep(.4)
                     except Exception as error:
                         print(json.dumps({'signalingError':type(error).__name__,'phase':phase,'seconds':round(time.monotonic()-started,2),'message':str(error)}),flush=True)
-                        if phase in ['poll','ice-config','answer-publish']:proxy=signaling_proxy()
+                        if phase in ['poll','ice-config','answer-publish']:
+                            proxy=signaling_proxy();install_turn_proxy(proxy)
                         await asyncio.sleep(2)
     finally:await agent.close()
 

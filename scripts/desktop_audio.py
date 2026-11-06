@@ -81,7 +81,7 @@ class DesktopAudioTrack(MediaStreamTrack):
     def stop(self):
         if self.closed:return
         self.closed=True;super().stop()
-        if getattr(self,'stream',None):self.stream.stop_stream();self.stream.close()
+        if getattr(self,'stream',None):self.stream.close()
         self.audio.terminate()
 
 def virtual_microphone_device(audio):
@@ -109,5 +109,5 @@ class MicrophoneSink:
             pass
     def close(self):
         self.closed=True
-        if self.stream:self.stream.stop_stream();self.stream.close()
+        if self.stream:self.stream.close()
         self.audio.terminate()

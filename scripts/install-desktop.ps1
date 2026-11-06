@@ -26,7 +26,7 @@ try{
  New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
  $oldTask=Get-ScheduledTask -TaskName CodexDesktopViewer -ErrorAction SilentlyContinue
  if($oldTask){Export-ScheduledTask -TaskName CodexDesktopViewer | Set-Content -LiteralPath (Join-Path $backupDir 'previous-task.xml') -Encoding Unicode}
- if(Test-Path -LiteralPath $desktopExe){Copy-Item -LiteralPath $desktopExe -Destination (Join-Path $backupDir 'previous-desktop.exe')}
+ if(-not $RuntimeOnly -and (Test-Path -LiteralPath $desktopExe)){Copy-Item -LiteralPath $desktopExe -Destination (Join-Path $backupDir 'previous-desktop.exe')}
  if(Test-Path -LiteralPath $oldInstalledExe){Copy-Item -LiteralPath $oldInstalledExe -Destination (Join-Path $backupDir 'previous-host.exe')}
  New-Item -ItemType File -Path (Join-Path $stateDir 'stop.request') -Force | Out-Null
  $deadline=(Get-Date).AddSeconds(20)
@@ -57,7 +57,7 @@ try{
   Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object {if($_.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Unexpected reparse point in protected installation.'};Protect-Path $_.FullName}
   Protect-Path $root
  }
- Copy-Item -LiteralPath $sourceExe -Destination $desktopExe -Force
+ if(-not $RuntimeOnly -or -not(Test-Path -LiteralPath $desktopExe)){Copy-Item -LiteralPath $sourceExe -Destination $desktopExe -Force}
  $identity=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
  $escapedExe=[Security.SecurityElement]::Escape($installedExe)
  $escapedDir=[Security.SecurityElement]::Escape($installDir)
