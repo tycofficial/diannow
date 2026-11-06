@@ -75,6 +75,7 @@ def emit(inputs):
         accepted=user32.SendInput(len(batch),batch,ctypes.sizeof(INPUT))
         error=ctypes.get_last_error()
         if accepted != len(batch):raise OSError(input_failure(accepted,len(batch),error))
+        return accepted
 def key(vk,up=False):
     scan=user32.MapVirtualKeyW(vk,4)
     extended=(scan&0xff00) in [0xe000,0xe100] or vk in [33,34,35,36,37,38,39,40,45,46,91,92,111]
@@ -193,6 +194,11 @@ class RemoteInput:
         if not user32.GetCursorPos(ctypes.byref(point)) or not self.bounds:return None
         left,top,width,height=self.bounds
         return {'x':max(0,min(1,(point.x-left)/max(1,width-1))),'y':max(0,min(1,(point.y-top)/max(1,height-1))),'visible':left<=point.x<left+width and top<=point.y<top+height}
+    def focus_pointer_window(self):
+        point=POINT()
+        if user32.GetCursorPos(ctypes.byref(point)):
+            target=user32.WindowFromPoint(point)
+            if target:user32.SetForegroundWindow(user32.GetAncestor(target,2) or target)
     def _apply(self,event):
         kind=event.get('type')
         owner=event.get('_owner','legacy')
@@ -259,7 +265,8 @@ class RemoteInput:
             button=int(event.get('button',0));down=bool(event.get('down'))
             if button not in [0,1,2]:return
             if down:
-                if button not in self.buttons:emit([mouse({0:2,1:32,2:8}[button])])
+                if button not in self.buttons:
+                    if emit([mouse({0:2,1:32,2:8}[button])]):self.focus_pointer_window()
                 state['buttons'].add(button);self.buttons.add(button)
             else:
                 state['buttons'].discard(button)

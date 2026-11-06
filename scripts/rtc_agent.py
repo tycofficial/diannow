@@ -24,6 +24,7 @@ from ice_consent import install_consent_window
 from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
 from control_transport import isolate_control
+from bitrate_stability import BitrateStability
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
@@ -124,15 +125,13 @@ class FastH264Encoder(H264Encoder):
         if self.delivery:self.delivery.bandwidth=self.target_bitrate
         if self.codec and (self.codec.width!=frame.width or self.codec.height!=frame.height):self.codec=None
         if self.codec and self.codec.name=='h264_amf':
-            applied=getattr(self,'applied_bitrate',self.codec.bit_rate);elapsed=time.monotonic()-self.created
-            # Setting AVCodecContext.bit_rate alone does not reconfigure AMF.
-            # Apply substantial decreases promptly and increases gradually;
-            # every replacement starts with complete decoder refresh headers.
-            if (self.target_bitrate<applied*.75 and elapsed>=.5) or (self.target_bitrate>applied*1.35 and elapsed>=4):
+            applied=getattr(self,'applied_bitrate',self.codec.bit_rate)
+            if not getattr(self,'rate_stability',None):self.rate_stability=BitrateStability()
+            if self.rate_stability.should_change(applied,self.target_bitrate,time.monotonic(),self.created):
                 self.codec=None;force_keyframe=True
         frame_seconds=float(frame.pts*frame.time_base) if frame.pts is not None and frame.time_base else time.monotonic()
         last_refresh=getattr(self,'last_keyframe_seconds',None)
-        force_keyframe=last_refresh is None or frame_seconds-last_refresh>=2 or (force_keyframe and frame_seconds-last_refresh>=.25)
+        force_keyframe=last_refresh is None or frame_seconds-last_refresh>=30 or (force_keyframe and frame_seconds-last_refresh>=.25)
         if force_keyframe:self.last_keyframe_seconds=frame_seconds
         frame.pict_type=av.video.frame.PictureType.I if force_keyframe else av.video.frame.PictureType.NONE
         if self.codec is None:
@@ -141,10 +140,10 @@ class FastH264Encoder(H264Encoder):
                 try:
                     codec=av.CodecContext.create(encoder,'w');codec.width=frame.width;codec.height=frame.height;codec.pix_fmt='bgra' if encoder=='h264_amf' else 'yuv420p';codec.bit_rate=self.target_bitrate
                     target_fps=metadata['fps']
-                    codec.framerate=fractions.Fraction(int(target_fps));codec.time_base=fractions.Fraction(1,90000);codec.gop_size=120;codec.max_b_frames=0
+                    codec.framerate=fractions.Fraction(int(target_fps));codec.time_base=fractions.Fraction(1,90000);codec.gop_size=max(60,int(target_fps*30));codec.max_b_frames=0
                     if encoder=='libx264':codec.profile='Baseline'
                     level='6.0' if frame.width*frame.height*target_fps>3840*2160*60 else ('5.2' if frame.width*frame.height>1920*1080 else '4.2')
-                    codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cbr','profile':'constrained_baseline','forced_idr':'1','async_depth':'1','enforce_hrd':'1','filler_data':'0','max_au_size':str(max(64000,self.target_bitrate//4))} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
+                    codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cbr','profile':'constrained_baseline','forced_idr':'1','async_depth':'1','enforce_hrd':'1','filler_data':'0'} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
                     codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic();self.applied_bitrate=self.target_bitrate;self.parameter_sets={}
                     print(json.dumps({'encoder':encoder,'targetFps':target_fps,'sessionId':metadata.get('sessionId')}),flush=True);break
                 except Exception as error:
@@ -264,11 +263,11 @@ class DesktopTrack(VideoStreamTrack):
         now=time.perf_counter();self.first=self.first or now
         # Never share AVFrame metadata/pict_type across encoder threads.
         frame=av.VideoFrame.from_numpy_buffer(pixels,format='bgra' if pixels.ndim==3 else 'yuv420p')
-        frame.opaque={'fps':self.fps,'delivery':self.delivery,'sessionId':self.session_id}
-        frame.pts=round((now-self.first)*90000);frame.time_base=fractions.Fraction(1,90000);self.sent+=1
-        self.frame_samples.append((now,self.sent))
+        frame.opaque={'fps':self.fps,'delivery':self.delivery,'sessionId':self.session_id,'preparedAt':now}
+        frame.pts=round((now-self.first)*90000);frame.time_base=fractions.Fraction(1,90000)
+        self.read_frames=getattr(self,'read_frames',0)+1
         self.read_total=getattr(self,'read_total',0)+read_time;self.convert_total=getattr(self,'convert_total',0)+convert_time
-        if self.sent%300==0:print(json.dumps({'sessionId':self.session_id,'width':self.width,'height':self.height,'targetFps':self.fps,'sentFrames':self.sent,'sourceFps':round(self.sent/max(.01,now-self.first),1),'captureWaitMs':round(1000*self.read_total/self.sent,2),'convertMs':round(1000*self.convert_total/self.sent,2),'sharedGrabs':self.frame_source.grabs,'sharedConversions':self.frame_source.conversions,**self.delivery_diagnostics(now)}),flush=True)
+        if self.read_frames%300==0:print(json.dumps({'sessionId':self.session_id,'width':self.width,'height':self.height,'targetFps':self.fps,'sentFrames':self.sent,'sourceFps':round(self.sent/max(.01,now-self.first),1),'captureWaitMs':round(1000*self.read_total/self.read_frames,2),'convertMs':round(1000*self.convert_total/self.read_frames,2),'sharedGrabs':self.frame_source.grabs,'sharedConversions':self.frame_source.conversions,**self.delivery_diagnostics(now)}),flush=True)
         return frame
     async def recv(self):
         loop=asyncio.get_running_loop()
@@ -281,6 +280,10 @@ class DesktopTrack(VideoStreamTrack):
         if pause>0:await asyncio.sleep(pause)
         self.last_delivery=deadline
         frame=await self.prefetch
+        prepared=getattr(frame,'opaque',None)
+        if isinstance(prepared,dict) and time.perf_counter()-prepared.get('preparedAt',time.perf_counter())>.05:
+            frame=await loop.run_in_executor(self.capture_pool,self.read_frame)
+        self.sent+=1;self.frame_samples.append((time.perf_counter(),self.sent))
         # A single prepared frame overlaps conversion with the previous
         # frame's AMF encoder. Never accumulate a queue under CPU load.
         self.prefetch=loop.run_in_executor(self.capture_pool,self.read_frame)

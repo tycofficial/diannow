@@ -6,8 +6,8 @@ const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
-async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass){
-  const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[];let timerId=0,clockNow=Date.now();
+async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=11){
+  const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[];let timerId=0,clockNow=Date.now();
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
     const listeners={};
@@ -34,10 +34,10 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   function clearTimer(id){if(wrongReceiver(this))throw new TypeError('Can only call Window.clearTimeout on instances of Window');timers.delete(id)}
   const navigator={audioSession:{type:'auto'}};
   const context=vm.createContext({window,navigator,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(){}},
-    location:{hostname:'screen.example'},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
-    Date:class extends Date{static now(){return clockNow}},AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
+    location:{hostname:'screen.example',href:'https://screen.example/',replace(value){navigations.push(value)}},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
+    Date:class extends Date{static now(){return clockNow}},URL,AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
-    fetch:async(path,options)=>{if(path.endsWith('/api/ice'))return {ok:true,json:async()=>({iceServers:[{urls:'turn:relay.example:3478?transport=tcp',username:'test',credential:'test'}],relayAvailable:true})};requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
+    fetch:async(path,options)=>{if(path.endsWith('/api/version'))return {ok:true,json:async()=>({build:serverBuild})};if(path.endsWith('/api/ice'))return {ok:true,json:async()=>({iceServers:[{urls:'turn:relay.example:3478?transport=tcp',username:'test',credential:'test'}],relayAvailable:true})};requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
   // Reproduce a host that already has common top-level names. Viewer must stay scoped.
   vm.runInContext('const video=1, keys=2, pc=3;',context);
   for(const script of sources)vm.runInContext(script,context);
@@ -51,7 +51,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   }
   async function fireTimer(delay){const entry=[...timers].find(([,timer])=>timer.delay===delay);assert(entry,'Expected a '+delay+' ms timer');timers.delete(entry[0]);entry[1].callback();await flush()}
   function dispatch(id,type,properties={}){const event={prevented:false,preventDefault(){this.prevented=true},...properties};for(const listener of nodes[id].listeners[type]||[])listener(event);return event}
-  return {nodes,stages,requests,peers,timers,fireTimer,channels,sent,dispatch,intervals,navigator,dispatchWindow(type,event){for(const listener of windowListeners[type]||[])listener(event)},advanceTime:ms=>clockNow+=ms};
+  return {nodes,stages,requests,peers,timers,navigations,setServerBuild(value){serverBuild=value},fireTimer,channels,sent,dispatch,intervals,navigator,dispatchWindow(type,event){for(const listener of windowListeners[type]||[])listener(event)},advanceTime:ms=>clockNow+=ms};
 }
 const connected=await start(true);
 assert(connected.stages.includes('connected'));
@@ -318,4 +318,8 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 
 {
  const retry=await start(true);retry.peers[0].connectionState='failed';retry.peers[0].onconnectionstatechange();await retry.fireTimer(1000);assert.equal(retry.peers[1].config.iceTransportPolicy,'relay');assert.deepEqual(JSON.parse(JSON.stringify(retry.peers[1].config.iceServers[0].urls)),['turn:relay.example:3478?transport=tcp']);console.log('Verified failed paths retry on a TCP relay and negotiate separate control.');
+}
+
+{
+ const updates=await start(true);updates.setServerBuild(12);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=12/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }

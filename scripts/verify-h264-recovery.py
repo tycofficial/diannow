@@ -9,7 +9,9 @@ for index in range(80):
     for plane in frame.planes:plane.update(bytes([index%256])*plane.buffer_size)
     frame.pts=index*1500;frame.time_base=fractions.Fraction(1,90000);frame.opaque={'fps':60}
     if index==40:
-        encoder.target_bitrate=350000;encoder.created=time.monotonic()-1
+        encoder.target_bitrate=350000;encoder.created=time.monotonic()-31
+        from bitrate_stability import BitrateStability
+        encoder.rate_stability=BitrateStability();encoder.rate_stability.should_change(encoder.applied_bitrate,350000,time.monotonic()-5,encoder.created)
     units=list(encoder._encode_frame(frame,index in [20,60]))
     kinds={unit[0]&31 for unit in units}
     if 5 in kinds:

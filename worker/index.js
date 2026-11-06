@@ -45,6 +45,7 @@ export default {
     if(path.startsWith('/s/')&&request.method==='GET')return Response.redirect(url.origin+'/',302);
     if(!path.startsWith('/api/'))return json({error:'Not found'},404);
     if(origin&&!allowedOrigins.has(origin))return json({error:'Origin is not allowed.'},403);
+    if(path==='/api/version'&&request.method==='GET')return json({build:Number((page.match(/const VIEWER_BUILD=(\d+)/)||[])[1]||0)});
     if(path==='/api/ice'&&request.method==='GET'){
       let configured=[];try{configured=JSON.parse(env.TURN_ICE_SERVERS_JSON||'[]')}catch{}
       const iceServers=Array.isArray(configured)?configured.filter(server=>server&&typeof server.username==='string'&&typeof server.credential==='string'&&(Array.isArray(server.urls)?server.urls:[server.urls]).every(value=>typeof value==='string'&&/^turns?:[^\s]+$/.test(value))):[];
