@@ -11,7 +11,8 @@ from rtc_agent import SharedFrameSource,DesktopTrack,FastH264Encoder
 class CameraDouble:
     is_capturing=True
     def __init__(self):self.grabs=0;self.image=np.random.default_rng(7).integers(0,256,(48,64,4),dtype=np.uint8)
-    def grab(self):self.grabs+=1;time.sleep(.003);return self.image.copy()
+    def get_latest_frame(self):self.grabs+=1;time.sleep(.003);return self.image.copy()
+    def grab(self):raise AssertionError('Do not grab DXGI again while its capture thread is active.')
 
 
 camera=CameraDouble();clock=[0.0];source=SharedFrameSource(camera,60,clock=lambda:clock[0])

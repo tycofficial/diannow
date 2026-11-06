@@ -97,9 +97,10 @@ class FastH264Encoder(H264Encoder):
         if self.codec and (self.codec.width!=frame.width or self.codec.height!=frame.height):self.codec=None
         frame.pict_type=av.video.frame.PictureType.I if force_keyframe else av.video.frame.PictureType.NONE
         if self.codec is None:
-            for encoder in ['libx264']:
+            encoders=['h264_amf','libx264'] if frame.format.name=='bgra' and not getattr(self,'hardware_failed',False) else ['libx264']
+            for encoder in encoders:
                 try:
-                    codec=av.CodecContext.create(encoder,'w');codec.width=frame.width;codec.height=frame.height;codec.pix_fmt='yuv420p'
+                    codec=av.CodecContext.create(encoder,'w');codec.width=frame.width;codec.height=frame.height;codec.pix_fmt='bgra' if encoder=='h264_amf' else 'yuv420p'
                     target_fps=metadata['fps']
                     codec.framerate=fractions.Fraction(int(target_fps));codec.time_base=fractions.Fraction(1,90000);codec.gop_size=120;codec.max_b_frames=0
                     if encoder=='libx264':codec.profile='Baseline'
@@ -108,8 +109,10 @@ class FastH264Encoder(H264Encoder):
                     codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic()
                     print(json.dumps({'encoder':encoder,'targetFps':target_fps,'sessionId':metadata.get('sessionId')}),flush=True);break
                 except Exception as error:
+                    if encoder=='h264_amf':self.hardware_failed=True
                     print(json.dumps({'encoderFallback':encoder,'reason':str(error)}),flush=True)
             if self.codec is None:raise RuntimeError('No H264 encoder is available.')
+        if self.codec.pix_fmt!=frame.format.name:frame=frame.reformat(format=self.codec.pix_fmt,threads=4)
         started=time.perf_counter();packets=self.codec.encode(frame)
         self.encode_total=getattr(self,'encode_total',0)+(time.perf_counter()-started);self.encode_count=getattr(self,'encode_count',0)+1
         if self.encode_count%300==0:print(json.dumps({'encodeMs':round(1000*self.encode_total/self.encode_count,2),'sessionId':metadata.get('sessionId')}),flush=True)
@@ -126,12 +129,21 @@ def encoder_factory(codec):
 aiortc.codecs.get_encoder=encoder_factory
 aiortc.rtcrtpsender.get_encoder=encoder_factory
 
+def hardware_bgra_available():
+    try:
+        codec=av.CodecContext.create('h264_amf','w');codec.width=1920;codec.height=1080;codec.pix_fmt='bgra';codec.time_base=fractions.Fraction(1,90000);codec.framerate=60
+        codec.options={'usage':'ultralowlatency','quality':'speed','rc':'cqp','qp_i':'16','qp_p':'16','profile':'constrained_baseline'}
+        codec.open();frame=av.VideoFrame(1920,1080,'bgra');frame.pts=0
+        for plane in frame.planes:plane.update(bytes(plane.buffer_size))
+        return bool(codec.encode(frame)+codec.encode(None))
+    except Exception:return False
+
 class SharedFrameSource:
     """One latest immutable raw/converted snapshot per source refresh tick."""
-    def __init__(self,camera,refresh=60,clock=time.perf_counter):
+    def __init__(self,camera,refresh=60,clock=time.perf_counter,hardware=False):
         self.camera=camera;self.refresh=max(1,refresh);self.clock=clock;self.lock=threading.Lock();self.closed=False
         self.raw=None;self.tick=None;self.captured_at=None;self.converted=OrderedDict();self.reformatter=av.video.reformatter.VideoReformatter()
-        self.grabs=0;self.conversions=0
+        self.grabs=0;self.conversions=0;self.hardware=hardware
     def get_yuv(self,width,height):
         started=self.clock()
         with self.lock:
@@ -139,16 +151,21 @@ class SharedFrameSource:
             if not self.camera.is_capturing:raise RuntimeError('Desktop capture stopped.')
             tick=int(self.clock()*self.refresh)
             if self.raw is None or tick!=self.tick:
-                image=self.camera.grab()
-                if image is None and self.camera.is_capturing:image=self.camera.get_latest_frame()
+                # The capture thread already owns DXGI. Reading its newest
+                # ring-buffer frame avoids a second synchronous desktop grab.
+                image=self.camera.get_latest_frame()
                 if image is None:raise RuntimeError('Desktop capture stopped.')
                 self.raw=image;self.tick=tick;self.captured_at=self.clock();self.grabs+=1;self.converted.clear()
             ready=self.clock();key=(width,height)
             if key in self.converted:
                 pixels=self.converted[key];self.converted.move_to_end(key)
             else:
+                if self.hardware and self.raw.shape[:2]==(height,width):
+                    pixels=self.raw;pixels.setflags(write=False);self.converted[key]=pixels
+                    while len(self.converted)>4:self.converted.popitem(last=False)
+                    return pixels,self.captured_at,ready-started,self.clock()-ready
                 frame=av.VideoFrame.from_numpy_buffer(self.raw,format='bgra')
-                frame=self.reformatter.reformat(frame,width=width,height=height,format='yuv420p',threads=4,interpolation='BILINEAR')
+                frame=self.reformatter.reformat(frame,width=width,height=height,format='bgra' if self.hardware else 'yuv420p',threads=4,interpolation='BILINEAR')
                 # Each replacement owns new storage. Existing VideoFrame
                 # wrappers keep their old array alive after cache eviction.
                 pixels=frame.to_ndarray();pixels.setflags(write=False)
@@ -175,7 +192,7 @@ class DesktopTrack(VideoStreamTrack):
         pixels,captured_at,read_time,convert_time=self.frame_source.get_yuv(self.width,self.height)
         now=time.perf_counter();self.first=self.first or now
         # Never share AVFrame metadata/pict_type across encoder threads.
-        frame=av.VideoFrame.from_numpy_buffer(pixels,format='yuv420p')
+        frame=av.VideoFrame.from_numpy_buffer(pixels,format='bgra' if pixels.ndim==3 else 'yuv420p')
         frame.opaque={'fps':self.fps,'delivery':self.delivery,'sessionId':self.session_id}
         frame.pts=round((now-self.first)*90000);frame.time_base=fractions.Fraction(1,90000);self.sent+=1
         self.frame_samples.append((now,self.sent))
@@ -398,7 +415,8 @@ class DesktopAgent:
         self.refresh=max(30,min(240,ctypes.windll.gdi32.GetDeviceCaps(screen_dc,116) or 60))
         ctypes.windll.user32.ReleaseDC.argtypes=[ctypes.c_void_p,ctypes.c_void_p]
         ctypes.windll.user32.ReleaseDC(None,screen_dc)
-        self.frame_source=SharedFrameSource(self.camera,min(120,self.refresh))
+        self.frame_source=SharedFrameSource(self.camera,min(120,self.refresh),hardware=hardware_bgra_available())
+        print(json.dumps({'hardwareBgra':self.frame_source.hardware}),flush=True)
         self.media_devices=MediaDevices()
     def update_input_state(self):
         if any(session.pc and session.pc.connectionState=='connected' for session in self.sessions):self.input.enabled=True

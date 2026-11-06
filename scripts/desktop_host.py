@@ -144,6 +144,10 @@ class AgentOutput:
 
 def run_engine():
     output=AgentOutput();sys.stdout=sys.stderr=output
+    # Favor the interactive stream without using high/realtime priorities.
+    api=kernel();api.GetCurrentProcess.restype=wintypes.HANDLE
+    api.SetPriorityClass.argtypes=[wintypes.HANDLE,wintypes.DWORD]
+    api.SetPriorityClass(api.GetCurrentProcess(),0x8000)
     atomic_json(STATE_DIR/'engine-status.json',{'authenticated':False,'pid':os.getpid(),'updated':time.time()})
     config=load_configuration();sys.stdin=io.StringIO(json.dumps(config)+'\n')
     import asyncio
