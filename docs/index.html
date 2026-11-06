@@ -313,6 +313,7 @@ document.getElementById('dragLock').onclick=()=>document.getElementById('dragLoc
 document.getElementById('deviceMode').onchange=()=>{release();const mode=document.getElementById('deviceMode').value;pad.hidden=mode!=='trackpad';document.getElementById('hapticInfo').textContent=typeof navigator.vibrate==='function'?'已启用浏览器触感反馈':'此浏览器不开放手机震动马达控制，使用按压视觉反馈';if(mode==='keyboard')focusHardware()};
 function hardwareKey(e,down){
  if(!connected||e.isComposing||hardwareComposing||e.key==='Process'||e.key==='Unidentified')return;
+ if((e.code==='Escape'||e.key==='Escape')&&e.ctrlKey&&e.shiftKey){e.preventDefault();if(down&&!e.repeat)runDesktopCommand('taskmgr.exe');return}
  const target=e.target;if(target&&target!==hardwareInput&&(['INPUT','TEXTAREA','SELECT','BUTTON'].includes(target.tagName)||target.isContentEditable))return;
  if(e.code&&(/^(Key[A-Z]|Digit[0-9]|F[0-9]+|Numpad.*)$/.test(e.code)||['Escape','Tab','Enter','Backspace','Delete','Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Insert','ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight','Minus','Equal','BracketLeft','BracketRight','Backslash','Semicolon','Quote','Comma','Period','Slash','Backquote'].includes(e.code))){e.preventDefault();send({type:'keyState',code:e.code,down,repeat:e.repeat})}
  else if(down&&e.key?.length===1){e.preventDefault();text(e.key)}
