@@ -11,7 +11,7 @@
 
 提供 720P、1080P、4K、自动清晰度和帧率选择。显示真实接收帧率、输入往返、音视频缓冲；未知统计不显示为零。使用显卡 H.264 固定清晰度编码，共享最新采集帧，避免历史画面排队。120Hz 虚拟屏幕已经支持，但实际传输帧率受显卡、网络、接收设备影响，不能承诺 4K/120fps。
 
-手机横屏时工具栏排列于左右，桌面使用全部可用高度；提供隐藏工具栏的专注模式。单指原生触控直接响应滑动和拖动，双指点击在两指中点执行右键，支持双指滚动。也可切换触控板、拖动锁定和速度。iPhone Safari 未提供网页震动接口时使用视觉反馈。
+手机横屏时工具栏排列于左右，桌面使用全部可用高度；提供隐藏工具栏的专注模式。单指原生触控直接响应滑动和拖动；静止点按也先发送更新帧再抬起，触控 API 失败时自动回退为鼠标点击、单指滚动和窗口标题栏拖动，双指点击在两指中点执行右键，支持双指滚动。也可切换触控板、拖动锁定和速度。iPhone Safari 未提供网页震动接口时使用视觉反馈。
 
 最多四个设备同时连接，各设备独立持有按键、鼠标和触控状态。支持外接实体键盘直接输入、中文输入、系统软键盘，以及包含字母、数字、标点、功能键和数字区的网页键盘。“窗口换屏”将当前窗口移动到另一显示器。
 
@@ -24,6 +24,8 @@
 ## 独立电脑后台
 
 桌面“远程桌面.exe”可手动启动、停止和重连；关闭其窗口或最小化 ChatGPT 不会停止后台。真实后端安装于受保护的 Program Files 目录，通过最高可用权限计划任务在登录、解锁、唤醒后启动，可操作同一交互桌面的管理员窗口。Windows UAC 安全桌面仍需本机确认。
+
+视频暂时停止解码时请求新的关键帧并重试现有播放器，操作通道仍存活时保留连接。初始连接超时不会误伤已连接的会话，真正网络断开后自动尝试中继。网页明确区分画面连接与操作通道就绪，小指针根据画面缩放，宽度不超过 10 CSS 像素。
 
 媒体进程使用 High 优先级、关闭其节能节流，不使用 Realtime。内核事件传递后台心跳，状态文件读取锁不会使进程崩溃。异常退出自动重试，旧会话清理不能无限期阻塞新连接。关机和睡眠期间不能传输，重启后需先登录 Windows。
 
@@ -42,6 +44,8 @@ node scripts/verify-signaling.mjs
 node scripts/verify-viewer-startup.mjs
 node scripts/verify-gestures.mjs
 node scripts/verify-trackpad.mjs
+python scripts/verify-touch-fallback.py
+python scripts/verify-native-touch.py
 python scripts/verify-microphone-routing.py
 python scripts/verify-media-device-lifecycle.py
 python scripts/verify-session-lifecycle.py

@@ -359,7 +359,7 @@ class DesktopSession:
         self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=getattr(self.owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])))
         self.track=track=DesktopTrack(self.camera,width,height,fps,self.session_id,frame_source=self.owner.frame_source)
         cnames={'video':self.session_id+'-video','audio':self.session_id+'-audio'}
-        independent_media_sender(pc.addTrack(track),cnames['video'])
+        self.video_sender=pc.addTrack(track);independent_media_sender(self.video_sender,cnames['video']);self.last_keyframe_request=0
         print(json.dumps({'sessionId':self.session_id,'streamStarted':True,'width':width,'height':height,'targetFps':fps}),flush=True)
         if 'm=audio' in offer.get('sdp',''):
             try:
@@ -397,7 +397,7 @@ class DesktopSession:
                     self.last_activity=time.monotonic()
                     if event.get('type')=='ping':
                         self.report_receiver(event)
-                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
+                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
                     elif event.get('type')=='settings':
                         target_width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(event.get('quality')),self.source_width))//2*2
                         track.width=target_width;track.height=max(2,round(self.source_height*target_width/self.source_width)//2*2)
@@ -412,7 +412,12 @@ class DesktopSession:
                                 set_preference(event['mode']);(DISPLAY_STATE/'restart.request').touch()
                             except Exception as error:input_result(event.get('id'),str(error))
                         asyncio.create_task(change_display())
-                    elif event.get('type')=='disconnect':asyncio.create_task(self.close())
+                    elif event.get('type')=='video-recover':
+                        now=time.monotonic()
+                        if now-self.last_keyframe_request>=2:
+                            self.last_keyframe_request=now;self.video_sender._send_keyframe()
+                            print(json.dumps({'sessionId':self.session_id,'videoRecovery':'keyframe-requested'}),flush=True)
+                    elif event.get('type')=='disconnect':asyncio.create_task(self.close('viewer-request'))
                     elif event.get('type')=='microphoneState':self.owner.audio_router.set_microphone(self.session_id,bool(event.get('enabled')))
                     else:
                         if event.get('type')=='move' and event.get('seq'):
@@ -423,14 +428,18 @@ class DesktopSession:
                 except Exception:pass
             @channel.on('close')
             def on_close():
-                self.input.release_owner(self.session_id)
+                try:self.input.release_owner(self.session_id)
+                except OSError as error:print(json.dumps({'releaseInputError':str(error)}),flush=True)
                 if channel.label=='input':self.owner.audio_router.set_microphone(self.session_id,False)
         @pc.on('connectionstatechange')
         async def on_state():
-            print(json.dumps({'sessionId':self.session_id,'connection':pc.connectionState}),flush=True)
+            pairs=[]
+            if pc.sctp:
+                for pair in pc.sctp.transport.transport._connection._nominated.values():pairs.append({'local':pair.local_candidate.type,'remote':pair.remote_candidate.type})
+            print(json.dumps({'sessionId':self.session_id,'connection':pc.connectionState,'ageSeconds':round(time.monotonic()-self.created_at,1),'candidatePairs':pairs}),flush=True)
             if pc.connectionState=='connected':self.last_activity=time.monotonic()
             self.owner.update_input_state()
-            if pc.connectionState in ['failed','closed']:asyncio.create_task(self.close())
+            if pc.connectionState in ['failed','closed']:asyncio.create_task(self.close('transport-'+pc.connectionState))
         async def expire_idle():
             while not self.closed:
                 await asyncio.sleep(5)
@@ -440,20 +449,22 @@ class DesktopSession:
         self.watchdog=asyncio.create_task(expire_idle())
         await pc.setRemoteDescription(RTCSessionDescription(sdp=offer['sdp'],type=offer['type']))
         for transceiver in pc.getTransceivers():install_cooperative_rtp_send(transceiver.sender.transport)
-        playout=configure_video_playout_delay(pc,offer['sdp'])
+        playout=configure_video_playout_delay(pc,offer['sdp'],maximum_ms=150)
         print(json.dumps({'sessionId':self.session_id,'videoPlayoutDelay':playout}),flush=True)
         await pc.setLocalDescription(independent_media_description(await pc.createAnswer(),cnames))
         return {'sdp':pc.localDescription.sdp,'type':pc.localDescription.type}
-    async def close(self):
+    async def close(self,reason='cleanup'):
         if self.close_task is None:
             if self.closed:return
+            print(json.dumps({'sessionId':self.session_id,'closeReason':reason,'ageSeconds':round(time.monotonic()-self.created_at,1)}),flush=True)
             self.close_task=asyncio.create_task(self._close())
         await asyncio.shield(self.close_task)
     async def _close(self):
         if self.closed:return
         self.closed=True
         self.owner.audio_router.set_microphone(self.session_id,False)
-        self.input.release_owner(self.session_id)
+        try:self.input.release_owner(self.session_id)
+        except OSError as error:print(json.dumps({'releaseInputError':str(error)}),flush=True)
         if self.watchdog and self.watchdog is not asyncio.current_task():self.watchdog.cancel()
         self.watchdog=None;self.answer_result=None
         def debug(stage):

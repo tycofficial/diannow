@@ -146,7 +146,7 @@ for(const status of [503,200]){
   peer.ontrack({track:videoTrack,receiver:videoReceiver});peer.ontrack({track:audioTrack,receiver:audioReceiver});
   assert.deepEqual(nodes.screen.srcObject.getTracks(),[videoTrack],'The video player must receive only video');
   assert.deepEqual(nodes.desktopAudio.srcObject.getTracks(),[audioTrack],'Desktop audio must have its own player and stream');
-  for(const receiver of [videoReceiver,audioReceiver]){assert.equal(receiver.jitterBufferTarget,0);assert.equal(receiver.playoutDelayHint,0)}
+  assert.equal(videoReceiver.jitterBufferTarget,20);assert.equal(videoReceiver.playoutDelayHint,.02);assert.equal(audioReceiver.jitterBufferTarget,0);assert.equal(audioReceiver.playoutDelayHint,0)
   assert.equal(videoTrack.contentHint,'detail');
   const unsupported={},otherVideo=track('video');peer.ontrack({track:otherVideo,receiver:unsupported});
   assert.equal(Object.hasOwn(unsupported,'jitterBufferTarget'),false,'An unsupported receiver hint must not be faked with an expando property');
@@ -292,3 +292,24 @@ for(const label of ['A','1 !','; :','/ ?',"' \"",'Caps','F12']){
  const keys=connected.sent.slice(start).filter(e=>e.type==='keyState');assert.equal(keys.length,2);assert.equal(keys[0].down,true);assert.equal(keys[1].down,false);
 }
 console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps and function keys with raw down/up events.');
+
+{
+ const viewer=await start(true),peer=viewer.peers[0],control=viewer.channels.find(c=>c.label==='input');
+ viewer.advanceTime(16000);
+ control.onmessage({data:JSON.stringify({type:'pong',time:0})});
+ await viewer.intervals[0]();
+ assert.equal(viewer.peers.length,1,'A stalled decoder with a live control channel must not tear down the peer');
+ assert(viewer.sent.some(e=>e.type==='video-recover'),'Recover with an IDR before any full reconnect');
+ assert(viewer.nodes.screen.playCalls>0,'Retry the existing player');
+ await viewer.fireTimer(12000);assert(![...viewer.timers.values()].some(timer=>timer.delay===30000),'Clear the initial deadline once connected');
+ assert.equal(viewer.peers.length,1,'Initial connection deadlines cannot disconnect a peer that has already connected');
+ control.readyState='connecting';
+ const before=viewer.sent.length;
+ viewer.nodes.screen.onpointerdown({pointerId:5,pointerType:'touch',preventDefault(){},clientX:40,clientY:40});
+ assert.equal(viewer.sent.length,before,'Do not silently accept a touch before the data channel opens');
+ assert.match(viewer.nodes.notice.textContent,/操作通道/);
+ control.readyState='open';control.onopen();assert.match(viewer.nodes.status.textContent,/操作可用/);
+ viewer.channels[0].onmessage({data:JSON.stringify({type:'cursor',cursor:{x:.2,y:.3,visible:true}})});
+ assert(parseFloat(viewer.nodes.remoteCursor.style.width)<=10,'Remote cursor must stay compact');
+ console.log('Verified video-stall recovery, stale deadline immunity, data-channel readiness and compact cursor.');
+}

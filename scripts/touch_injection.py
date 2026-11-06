@@ -9,7 +9,8 @@ class POINTER_TOUCH_INFO(ctypes.Structure):
 
 class NativeTouch:
     def __init__(self,api=None):
-        self.api=api or ctypes.WinDLL('user32',use_last_error=True);self.active=False;self.position=(0,0);self.ready=False;self.lock=threading.RLock();self.bounds=None
+        self.api=api or ctypes.WinDLL('user32',use_last_error=True);self.active=False;self.updated=False;self.position=(0,0);self.ready=False;self.lock=threading.RLock();self.bounds=None
+        self.api.InitializeTouchInjection.argtypes=[w.UINT,w.DWORD];self.api.InitializeTouchInjection.restype=w.BOOL
         self.api.InjectTouchInput.argtypes=[w.UINT,ctypes.POINTER(POINTER_TOUCH_INFO)];self.api.InjectTouchInput.restype=w.BOOL
     def inject(self,flags,position):
         contact=POINTER_TOUCH_INFO();p=contact.pointerInfo;p.pointerType=2;p.pointerId=1;p.pointerFlags=flags
@@ -29,12 +30,17 @@ class NativeTouch:
             position=(left+round(max(0,min(1,float(event.get('x',0))))*(width-1)),top+round(max(0,min(1,float(event.get('y',0))))*(height-1)))
             if phase=='down':
                 if self.active:self.release(True)
-                self.inject(0x10000|2|4,position);self.active=True;self.position=position
+                self.inject(0x10000|2|4,position);self.active=True;self.updated=False;self.position=position
             elif phase in ['move','up','cancel'] and self.active:
                 if phase!='cancel' and position!=self.position:
-                    self.inject(0x20000|2|4,position);self.position=position
+                    self.inject(0x20000|2|4,position);self.position=position;self.updated=True
                 if phase in ['up','cancel']:self.release(phase=='cancel')
     def release(self,cancel=False):
         with self.lock:
             if self.active:
-                self.inject(0x40000|(0x8000 if cancel else 0),self.position);self.active=False
+                try:
+                    # Windows requires UP to match a preceding UPDATE, even
+                    # when a tap never moved. DOWN -> UP could fail with 87.
+                    if not self.updated:self.inject(0x20000|2|4,self.position)
+                    self.inject(0x40000|(0x8000 if cancel else 0),self.position)
+                finally:self.active=False

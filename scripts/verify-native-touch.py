@@ -11,4 +11,6 @@ assert [flags for flags,_ in events]==[0x10006,0x20006,0x40000]
 assert events[-1][1]==events[-2][1] and not touch.active
 touch.apply({'phase':'down','x':.3,'y':.3});touch.release(True)
 assert events[-1][0]==0x48000 and not touch.active
+events.clear();touch.apply({'phase':'down','x':.3,'y':.3});touch.apply({'phase':'up','x':.3,'y':.3})
+assert [flags for flags,_ in events]==[0x10006,0x20006,0x40000],'A stationary tap must UPDATE before UP to avoid WinError 87'
 print('Native touch ABI, final-position update, UP coordinate invariants and cancellation passed without desktop input.')

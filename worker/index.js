@@ -53,7 +53,7 @@ export default {
     if(path==='/api/client-report'&&request.method==='POST'){
       const raw=await request.text();if(raw.length>2000)return json({error:'Report too large'},413);
       let value;try{value=JSON.parse(raw)}catch{return json({error:'Invalid report'},400)}
-      if(!['boot','ready','connecting','offer-created','offer-sent','answer-received','connected','startup-error','connection-error'].includes(value.stage))return json({error:'Invalid stage'},400);
+      if(!['boot','ready','connecting','offer-created','offer-sent','answer-received','connected','startup-error','connection-error','input-error','video-recover'].includes(value.stage))return json({error:'Invalid stage'},400);
       const log=value.error?console.error:console.log;
       log('viewer-diagnostic',JSON.stringify({stage:value.stage,error:String(value.error||'').slice(0,300),rtc:String(value.rtc||'').slice(0,20),secure:!!value.secure,embedded:!!value.embedded}));
       return new Response(null,{status:204,headers});

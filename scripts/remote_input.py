@@ -1,5 +1,5 @@
 """Input used only by the authenticated remote viewer's WebRTC data channel."""
-import ctypes, threading, queue, time
+import ctypes, threading, queue, time,json
 from ctypes import wintypes
 from touch_injection import NativeTouch
 
@@ -84,6 +84,7 @@ def mouse(flags,data=0,x=0,y=0): return INPUT(type=0,mi=MOUSEINPUT(dx=x,dy=y,mou
 class RemoteInput:
     def __init__(self):
         self.touch=NativeTouch()
+        self.native_touch=True;self.touch_error=None;self.compat_touch=None
         self.owners={};self.touch_owner=None;self.state_lock=threading.RLock()
         self.bounds=None
         self.events=queue.Queue(maxsize=512);self.buttons=set();self.pressed=set();self.running=True;self.error=None;self.enabled=False;self.on_result=None;self.move_sequence=0
@@ -95,7 +96,7 @@ class RemoteInput:
     def release_all(self):
         with self.state_lock:self._release_all()
     def _release_all(self):
-        self.touch.release(True)
+        self._release_touch()
         self.touch_owner=None;self.owners.clear()
         flags={0:4,1:64,2:16}
         for button in list(self.buttons):emit([mouse(flags.get(button,4))])
@@ -104,8 +105,8 @@ class RemoteInput:
         self.pressed.clear()
     def release_owner(self,owner):
         with self.state_lock:
+            if self.touch_owner==owner:self._release_touch();self.touch_owner=None
             state=self.owners.pop(owner,None)
-            if self.touch_owner==owner:self.touch.release(True);self.touch_owner=None
             if not state:return
             for vk in state['keys']:
                 if not any(vk in value['keys'] for value in self.owners.values()):emit([key(vk,True)]);self.pressed.discard(vk)
@@ -129,6 +130,7 @@ class RemoteInput:
                 if on_result and event.get('id'):on_result(event['id'],None)
             except Exception as error:
                 self.error=str(error)
+                print(json.dumps({'remoteInputError':str(error),'eventType':event.get('type')}),flush=True)
                 if on_result and event.get('id'):on_result(event['id'],self.error)
     def tap(self,vk,modifiers=()):
         down=list(dict.fromkeys([*modifiers,vk]))
@@ -141,6 +143,48 @@ class RemoteInput:
             self.pressed.difference_update(down)
     def apply(self,event):
         with self.state_lock:self._apply(event)
+    def _touch_failed(self,error):
+        self.native_touch=False;self.touch_error=str(error);self.touch.active=False
+        print(json.dumps({'touchFallback':True,'winerror':getattr(error,'winerror',None),'error':str(error)}),flush=True)
+    def _release_touch(self):
+        try:self.touch.release(True)
+        except OSError as error:self._touch_failed(error)
+        if self.compat_touch:
+            owner=self.compat_touch['owner'];self.compat_touch=None
+            self._apply({'type':'button','button':0,'down':False,'_owner':owner})
+    def _touch_drag_target(self,x,y):
+        if not self.bounds:return False
+        left,top,width,height=self.bounds;point=POINT(left+round(x*(width-1)),top+round(y*(height-1)))
+        target=user32.WindowFromPoint(point)
+        if not target:return False
+        target=user32.GetAncestor(target,2) or target;result=ULONG_PTR()
+        user32.SendMessageTimeoutW.argtypes=[wintypes.HWND,wintypes.UINT,wintypes.WPARAM,wintypes.LPARAM,wintypes.UINT,wintypes.UINT,ctypes.POINTER(ULONG_PTR)]
+        user32.SendMessageTimeoutW.restype=wintypes.LPARAM
+        packed=(point.x&65535)|((point.y&65535)<<16)
+        return bool(user32.SendMessageTimeoutW(target,0x84,0,packed,2,10,ctypes.byref(result))) and result.value in [2,10,11,12,13,14,15,16,17]
+    def _compatible_touch(self,event,owner):
+        phase=event.get('phase');x=max(0,min(1,float(event.get('x',0))));y=max(0,min(1,float(event.get('y',0))))
+        def emit_event(kind,**values):self._apply({'type':kind,'_owner':owner,**values})
+        if phase=='down':
+            if self.compat_touch:self._release_touch()
+            drag=self._touch_drag_target(x,y);self.compat_touch={'owner':owner,'start':(x,y),'last':(x,y),'drag':drag,'moved':False}
+            emit_event('move',x=x,y=y)
+            if drag:emit_event('button',button=0,down=True)
+        elif self.compat_touch and self.compat_touch['owner']==owner:
+            gesture=self.compat_touch;width,height=self.bounds[2:] if self.bounds else (1920,1080)
+            if phase=='move':
+                dx=(x-gesture['start'][0])*width;dy=(y-gesture['start'][1])*height
+                if abs(dx)+abs(dy)>4:gesture['moved']=True
+                if gesture['drag']:emit_event('move',x=x,y=y)
+                elif gesture['moved']:
+                    delta=round((y-gesture['last'][1])*height*2)
+                    if delta:emit_event('wheel',delta=delta,x=x,y=y)
+                gesture['last']=(x,y)
+            elif phase in ['up','cancel']:
+                self.compat_touch=None
+                if gesture['drag']:emit_event('move',x=x,y=y);emit_event('button',button=0,down=False)
+                elif phase=='up' and not gesture['moved']:
+                    emit_event('button',button=0,down=True,x=x,y=y);emit_event('button',button=0,down=False)
     def cursor(self):
         point=POINT()
         if not user32.GetCursorPos(ctypes.byref(point)) or not self.bounds:return None
@@ -151,9 +195,17 @@ class RemoteInput:
         owner=event.get('_owner','legacy')
         state=self.owners.setdefault(owner,{'keys':set(),'buttons':set()})
         if kind=='touch':
-            if event.get('phase')=='down':self.touch_owner=owner
+            if event.get('phase')=='down':
+                if self.touch_owner and self.touch_owner!=owner:self._release_touch()
+                self.touch_owner=owner
             if self.touch_owner==owner:
-                self.touch.apply(event)
+                if self.native_touch:
+                    try:self.touch.apply(event)
+                    except OSError as error:
+                        self._touch_failed(error)
+                        self._compatible_touch({**event,'phase':'down'},owner)
+                        if event.get('phase')!='down':self._compatible_touch(event,owner)
+                else:self._compatible_touch(event,owner)
                 if event.get('phase') in ['up','cancel']:self.touch_owner=None
         elif kind=='relative':
             previous=state.get('fraction',(0,0));x=max(-2000,min(2000,float(event.get('dx',0))))+previous[0];y=max(-2000,min(2000,float(event.get('dy',0))))+previous[1]
