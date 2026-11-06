@@ -30,11 +30,15 @@ async def main():
     pair=SimpleNamespace(protocol=SimpleNamespace(transport=object()),local_candidate=SimpleNamespace(type='host'),remote_candidate=SimpleNamespace(type='relay'))
     connection=SimpleNamespace(_nominated={1:pair},_closed=False)
     dtls=SimpleNamespace(transport=SimpleNamespace(_connection=connection),state='connected',_send_rtp=send)
-    sender=SimpleNamespace(_RTCRtpSender__rtp_task=asyncio.current_task(),_RTCRtpSender__encoder=SimpleNamespace(requested_bitrate=350000))
+    sender=SimpleNamespace(_RTCRtpSender__rtp_task=asyncio.current_task(),_RTCRtpSender__rtt=.6,_RTCRtpSender__encoder=SimpleNamespace(requested_bitrate=350000))
     remote=install_turn_flow_control(dtls,[102],video_sender=sender);started=asyncio.get_running_loop().time()
     for _ in range(16):await dtls._send_rtp(bytes([128,102])+bytes(1198))
     elapsed=asyncio.get_running_loop().time()-started
-    assert elapsed>.3 and remote['relayed'] and not remote['configuredWriters'],'Remote-only relay traffic bypassed pacing'
-    assert remote['pacingBitsPerSecond']==385000,'Low receiver bandwidth must not be replaced by a 1.5Mbps floor'
+    assert elapsed>.08 and remote['relayed'] and not remote['configuredWriters'],'Remote-only relay traffic bypassed pacing'
+    assert remote['pacingBitsPerSecond']==1500000,'A static-screen estimate alone must not permanently cap throughput'
+    sender._RTCRtpSender__rtt=.9;started=asyncio.get_running_loop().time()
+    for _ in range(16):await dtls._send_rtp(bytes([128,102])+bytes(1198))
+    assert asyncio.get_running_loop().time()-started>.3
+    assert remote['pacingBitsPerSecond']==385000,'Confirmed RTT queue growth must restore the conservative bandwidth cap'
     print('Verified bounded video queue, audio progress, merged video payload types and prompt close. No network traffic.')
 asyncio.run(main())

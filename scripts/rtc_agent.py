@@ -114,7 +114,7 @@ class DeliveryPolicy:
 
 class FastH264Encoder(H264Encoder):
     @property
-    def target_bitrate(self):return getattr(self,'requested_bitrate',2000000)
+    def target_bitrate(self):return getattr(self,'capacity_bitrate',getattr(self,'requested_bitrate',2000000))
     @target_bitrate.setter
     def target_bitrate(self,value):
         self.requested_bitrate=max(350000,min(int(value),100000000))
