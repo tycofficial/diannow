@@ -9,7 +9,7 @@ class POINTER_TOUCH_INFO(ctypes.Structure):
 
 class NativeTouch:
     def __init__(self,api=None):
-        self.api=api or ctypes.WinDLL('user32',use_last_error=True);self.active=False;self.position=(0,0);self.ready=False;self.lock=threading.RLock()
+        self.api=api or ctypes.WinDLL('user32',use_last_error=True);self.active=False;self.position=(0,0);self.ready=False;self.lock=threading.RLock();self.bounds=None
         self.api.InjectTouchInput.argtypes=[w.UINT,ctypes.POINTER(POINTER_TOUCH_INFO)];self.api.InjectTouchInput.restype=w.BOOL
     def inject(self,flags,position):
         contact=POINTER_TOUCH_INFO();p=contact.pointerInfo;p.pointerType=2;p.pointerId=1;p.pointerFlags=flags
@@ -25,8 +25,8 @@ class NativeTouch:
             if not self.ready:
                 if not self.api.InitializeTouchInjection(1,3):raise ctypes.WinError(ctypes.get_last_error())
                 self.ready=True
-            phase=event.get('phase');width=self.api.GetSystemMetrics(0);height=self.api.GetSystemMetrics(1)
-            position=(round(max(0,min(1,float(event.get('x',0))))*(width-1)),round(max(0,min(1,float(event.get('y',0))))*(height-1)))
+            phase=event.get('phase');left,top,width,height=self.bounds or (0,0,self.api.GetSystemMetrics(0),self.api.GetSystemMetrics(1))
+            position=(left+round(max(0,min(1,float(event.get('x',0))))*(width-1)),top+round(max(0,min(1,float(event.get('y',0))))*(height-1)))
             if phase=='down':
                 if self.active:self.release(True)
                 self.inject(0x10000|2|4,position);self.active=True;self.position=position

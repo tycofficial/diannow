@@ -1,3 +1,4 @@
+param([switch]$HostOnly)
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $project
@@ -10,6 +11,7 @@ if (Test-Path -LiteralPath $runtimeCertificates) { $arguments += @('--add-data',
 $arguments += 'scripts/desktop_host.py'
 & $python @arguments
 if ($LASTEXITCODE -ne 0) { throw 'EXE build failed.' }
+if($HostOnly){exit}
 # Keep the elevated backend in a protected, unpacked installation. The desktop
 # file remains a normal one-file launcher and asks Task Scheduler to start it.
 $arguments=$arguments | ForEach-Object { if($_ -eq '--onedir'){'--onefile'}elseif($_ -eq 'outputs/host'){'outputs/exe'}else{$_} }

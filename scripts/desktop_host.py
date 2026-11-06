@@ -93,6 +93,12 @@ def start_background():
 
 def resumed(last_tick,current_tick):return current_tick-last_tick>15
 
+def stop_engine(process,api,job):
+    if not process or process.poll() is not None:return
+    (STATE_DIR/'engine-stop.request').touch()
+    try:process.wait(timeout=8)
+    except subprocess.TimeoutExpired:api.TerminateJobObject(job,0);process.wait(timeout=15)
+
 def supervise():
     mutex=claim_mutex()
     if mutex is None:return
@@ -112,13 +118,14 @@ def supervise():
             if resumed(last_tick,now) or requested:
                 (STATE_DIR/'restart.request').unlink(missing_ok=True)
                 if process and process.poll() is None:
-                    api.TerminateJobObject(job,0);process.wait(timeout=15)
+                    stop_engine(process,api,job)
                 process=None;restart_at=now
                 log('resume-or-restart',stalled=stalled)
             last_tick=now
             if process and process.poll() is not None:
                 log('engine-exited',code=process.returncode);process=None;restart_at=now+3
             if process is None and now>=restart_at:
+                (STATE_DIR/'engine-stop.request').unlink(missing_ok=True)
                 process=subprocess.Popen(own_command('--agent'),cwd=APP_DIR,creationflags=CREATE_NO_WINDOW,close_fds=True)
                 if not api.AssignProcessToJobObject(job,int(process._handle)):
                     process.kill();raise ctypes.WinError(ctypes.get_last_error())
@@ -127,7 +134,7 @@ def supervise():
             time.sleep(1)
     finally:
         if process and process.poll() is None:
-            api.TerminateJobObject(job,0);process.wait(timeout=15)
+            stop_engine(process,api,job)
         atomic_json(STATE_DIR/'host-status.json',{'running':False,'updated':time.time()})
         api.SetThreadExecutionState(0x80000000);api.CloseHandle(job);api.CloseHandle(mutex)
         log('host-stopped')
@@ -177,6 +184,10 @@ def self_test(destination):
         config=load_configuration();result['configurationReadable']=True
         import rtc_agent, av, pyaudiowpatch
         av.Codec('libx264','w');result['mediaDependenciesReady']=True
+        from desktop_audio import DesktopAudioTrack
+        result['captureDrivenAudio']='to_thread' in DesktopAudioTrack.recv.__code__.co_names
+        from display_target import capture_target
+        target,_,_=capture_target();result['display']={'width':target['bounds'][2],'height':target['bounds'][3],'refresh':target['refresh'],'virtual':target['virtual']}
         import asyncio,aiohttp
         async def check():
             headers={'X-Agent-Key':config['agentKey']}

@@ -17,6 +17,7 @@ import aiortc.codecs, aiortc.rtcrtpsender
 from remote_input import RemoteInput
 from desktop_audio import DesktopAudioTrack, MicrophoneSink, TimelineOpusEncoder
 from audio_routing import AudioRouter
+from display_target import capture_target,displays,set_preference,activate_virtual,STATE as DISPLAY_STATE
 from low_latency_rtp import configure_video_playout_delay
 from rtp_scheduling import install_cooperative_rtp_send
 
@@ -387,11 +388,21 @@ class DesktopSession:
                     self.last_activity=time.monotonic()
                     if event.get('type')=='ping':
                         self.report_receiver(event)
-                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
+                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
                     elif event.get('type')=='settings':
                         target_width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(event.get('quality')),self.source_width))//2*2
                         track.width=target_width;track.height=max(2,round(self.source_height*target_width/self.source_width)//2*2)
                         track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.delivery=DeliveryPolicy(track.fps)
+                    elif event.get('type')=='display' and event.get('mode') in ['original','virtual']:
+                        if event['mode']=='virtual' and not any(d['virtual'] and d['attached'] for d in displays()):raise RuntimeError('Virtual display not ready')
+                        async def change_display():
+                            try:
+                                if event['mode']=='virtual':
+                                    width,height=(3840,2160) if event.get('resolution')=='2160' else (1920,1080)
+                                    await asyncio.to_thread(activate_virtual,width,height,120)
+                                set_preference(event['mode']);(DISPLAY_STATE/'restart.request').touch()
+                            except Exception as error:input_result(event.get('id'),str(error))
+                        asyncio.create_task(change_display())
                     elif event.get('type')=='disconnect':asyncio.create_task(self.close())
                     else:
                         if event.get('type')=='move' and event.get('seq'):
@@ -453,13 +464,15 @@ class DesktopSession:
 
 class DesktopAgent:
     def __init__(self):
-        self.camera=dxcam.create(output_color='BGRA',max_buffer_len=2,processor_backend='numpy')
+        self.display,device_index,output_index=capture_target()
+        self.camera=dxcam.create(device_idx=device_index,output_idx=output_index,output_color='BGRA',max_buffer_len=2,processor_backend='numpy')
         self.input=RemoteInput();self.sessions=[];self.closed=False
-        self.source_width=ctypes.windll.user32.GetSystemMetrics(0);self.source_height=ctypes.windll.user32.GetSystemMetrics(1)
+        self.input.bounds=tuple(self.display['bounds']);self.input.touch.bounds=self.input.bounds
+        self.source_width=self.display['bounds'][2];self.source_height=self.display['bounds'][3]
         ctypes.windll.user32.GetDC.restype=ctypes.c_void_p
         screen_dc=ctypes.windll.user32.GetDC(None)
         ctypes.windll.gdi32.GetDeviceCaps.argtypes=[ctypes.c_void_p,ctypes.c_int]
-        self.refresh=max(30,min(240,ctypes.windll.gdi32.GetDeviceCaps(screen_dc,116) or 60))
+        self.refresh=max(30,min(240,self.display['refresh'] or 60))
         ctypes.windll.user32.ReleaseDC.argtypes=[ctypes.c_void_p,ctypes.c_void_p]
         ctypes.windll.user32.ReleaseDC(None,screen_dc)
         self.frame_source=SharedFrameSource(self.camera,min(120,self.refresh),hardware=hardware_bgra_available())
@@ -517,6 +530,7 @@ async def run_agent():
             async with aiohttp.ClientSession(headers=auth_headers,timeout=timeout,trust_env=True,cookie_jar=aiohttp.DummyCookieJar()) as session:
                 heartbeat_at=0
                 while not agent.closed:
+                    if (DISPLAY_STATE/'engine-stop.request').exists():break
                     if time.monotonic()-heartbeat_at>=5:
                         print(json.dumps({'engineHeartbeat':True}),flush=True);heartbeat_at=time.monotonic()
                     try:

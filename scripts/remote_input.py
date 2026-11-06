@@ -85,6 +85,7 @@ class RemoteInput:
     def __init__(self):
         self.touch=NativeTouch()
         self.owners={};self.touch_owner=None;self.state_lock=threading.RLock()
+        self.bounds=None
         self.events=queue.Queue(maxsize=512);self.buttons=set();self.pressed=set();self.running=True;self.error=None;self.enabled=False;self.on_result=None;self.move_sequence=0
         self.thread=threading.Thread(target=self.run,name='RemoteInput',daemon=True);self.thread.start()
     def submit(self,event,on_result=None):
@@ -152,7 +153,12 @@ class RemoteInput:
         elif kind=='relative':
             previous=state.get('fraction',(0,0));x=max(-2000,min(2000,float(event.get('dx',0))))+previous[0];y=max(-2000,min(2000,float(event.get('dy',0))))+previous[1]
             dx=round(x);dy=round(y);state['fraction']=(x-dx,y-dy)
-            if dx or dy:emit([mouse(1,x=dx,y=dy)])
+            if dx or dy:
+                if self.bounds:
+                    point=POINT();user32.GetCursorPos(ctypes.byref(point));left,top,width,height=self.bounds
+                    x=point.x if left<=point.x<left+width else left+width/2;y=point.y if top<=point.y<top+height else top+height/2
+                    self.apply({'type':'move','x':max(0,min(1,(x+dx-left)/max(1,width-1))),'y':max(0,min(1,(y+dy-top)/max(1,height-1))),'_owner':owner})
+                else:emit([mouse(1,x=dx,y=dy)])
         elif kind=='keyState':
             code=str(event.get('code',''));vk=PHYSICAL.get(code,KEYS.get(code))
             if vk is None:return
@@ -166,7 +172,10 @@ class RemoteInput:
             if sequence and sequence<self.move_sequence:return
             if sequence:self.move_sequence=sequence
             x=max(0,min(1,float(event.get('x',0))));y=max(0,min(1,float(event.get('y',0))))
-            emit([mouse(0x8001,x=round(x*65535),y=round(y*65535))])
+            if self.bounds:
+                left,top,width,height=self.bounds;vx=user32.GetSystemMetrics(76);vy=user32.GetSystemMetrics(77);vw=user32.GetSystemMetrics(78);vh=user32.GetSystemMetrics(79)
+                x=(left+x*(width-1)-vx)/max(1,vw-1);y=(top+y*(height-1)-vy)/max(1,vh-1)
+            emit([mouse(0x8001|(0x4000 if self.bounds else 0),x=round(x*65535),y=round(y*65535))])
         elif kind=='button':
             if 'x' in event and 'y' in event:self.apply({'type':'move','x':event['x'],'y':event['y']})
             button=int(event.get('button',0));down=bool(event.get('down'))

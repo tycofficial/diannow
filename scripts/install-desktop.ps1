@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 $principal=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
@@ -19,12 +19,8 @@ $desktopExe=Join-Path ([Environment]::GetFolderPath('Desktop')) '远程桌面.ex
 $report=Join-Path $stateDir 'installation-result.json'
 try{
  if(-not(Test-Path -LiteralPath $sourceExe) -or -not(Test-Path -LiteralPath (Join-Path $sourceHost 'RemoteDesktop.exe')) -or -not(Test-Path -LiteralPath $configuration)){throw 'Build or connection configuration missing.'}
- $driverInf=Join-Path $project 'outputs\vb-cable\package\vbMmeCable64_win10.inf'
- $driverCode=$null
- if(Test-Path -LiteralPath $driverInf){
-  & (Join-Path $env:WINDIR 'System32\pnputil.exe') /add-driver $driverInf /install *> (Join-Path $stateDir 'driver-install.log')
-  $driverCode=$LASTEXITCODE
- }
+ & (Join-Path $PSScriptRoot 'install-signed-drivers.ps1')
+ $driverCode=0
  $backupDir=Join-Path $appDir ('backups\'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
  New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
  $oldTask=Get-ScheduledTask -TaskName CodexDesktopViewer -ErrorAction SilentlyContinue

@@ -86,6 +86,14 @@ class CoreAudio:
         policy=self.create('870af99c-171d-4f9e-af0d-e63df40c2bc9','f8679f50-850a-41cf-9c72-430f290290c8')
         try:call(policy,13,w.LPCWSTR,c.c_int)(identifier,role)
         finally:release(policy)
+    def configure_virtual_format(self,identifier):
+        class WaveFormat(c.Structure):
+            _pack_=1
+            _fields_=[('tag',w.WORD),('channels',w.WORD),('rate',w.DWORD),('bytesPerSecond',w.DWORD),('blockAlign',w.WORD),('bits',w.WORD),('extra',w.WORD)]
+        wave=WaveFormat(1,2,48000,192000,4,16,0)
+        policy=self.create('870af99c-171d-4f9e-af0d-e63df40c2bc9','f8679f50-850a-41cf-9c72-430f290290c8')
+        try:call(policy,6,w.LPCWSTR,c.c_void_p,c.c_void_p)(identifier,c.byref(wave),c.byref(wave))
+        finally:release(policy)
     def activate(self,device,iid):
         result=c.c_void_p();call(device,3,c.POINTER(GUID),w.DWORD,c.c_void_p,c.POINTER(c.c_void_p))(c.byref(GUID(iid)),23,None,c.byref(result));return result
     def normalize_virtual(self,identifier):
@@ -155,3 +163,15 @@ class AudioRouter:
     def close(self):
         self.stop_event.set()
         if self.thread:self.thread.join(timeout=4)
+
+if __name__=='__main__':
+    import json
+    core=CoreAudio();result=[]
+    try:
+        for flow in [0,1]:
+            for name,identifier in endpoints(flow):
+                if 'cable input' in name.lower() or 'cable output' in name.lower():
+                    try:core.configure_virtual_format(identifier);result.append({'device':name,'rate':48000,'ok':True})
+                    except OSError as error:result.append({'device':name,'ok':False,'error':str(error)})
+        print(json.dumps(result))
+    finally:core.close()

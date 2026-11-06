@@ -11,8 +11,8 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
     const listeners={};
-    nodes[id]={textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
-      classList:{toggle(){open=!open;return open}},setAttribute(){},appendChild(){},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
+    nodes[id]={children:[],textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
+      classList:{toggle(){open=!open;return open}},setAttribute(){},appendChild(child){this.children.push(child)},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
   }
   class Peer{
     iceGatheringState='complete';connectionState='new';
@@ -33,8 +33,8 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   function setTimer(callback,delay){if(wrongReceiver(this))throw new TypeError('Can only call Window.setTimeout on instances of Window');timers.set(++timerId,{callback,delay});return timerId}
   function clearTimer(id){if(wrongReceiver(this))throw new TypeError('Can only call Window.clearTimeout on instances of Window');timers.delete(id)}
   const navigator={audioSession:{type:'auto'}};
-  const context=vm.createContext({window,navigator,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({appendChild(){},classList:{add(){},remove(){}}}),addEventListener(){}},
-    location:{hostname:'screen.example'},setTimeout:setTimer,clearTimeout:clearTimer,setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
+  const context=vm.createContext({window,navigator,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(){}},
+    location:{hostname:'screen.example'},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
     fetch:async(path,options)=>{requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
@@ -281,3 +281,12 @@ for(const [type,down] of [['keydown',true],['keyup',false]])connected.dispatchWi
 assert.deepEqual(connected.sent.slice(rawStart).map(e=>[e.type,e.code,e.down]),[['keyState','KeyA',true],['keyState','KeyA',false]]);
 const ignored=connected.sent.length;connected.dispatchWindow('keydown',{key:'a',code:'KeyA',preventDefault(){},target:{tagName:'TEXTAREA'}});assert.equal(connected.sent.length,ignored);
 console.log('Hardware keyboard routes without opening the on-screen keyboard and preserves local text editing.');
+
+const virtualButtons=connected.nodes.oskRows.children.flatMap(row=>row.children);
+assert(virtualButtons.length>=96);
+for(const label of ['A','1 !','; :','/ ?',"' \"",'Caps','F12']){
+ const button=virtualButtons.find(b=>b.textContent===label);assert(button,'Full keyboard includes '+label);const start=connected.sent.length;
+ button.onpointerdown({pointerId:99,preventDefault(){}});button.onpointerup();
+ const keys=connected.sent.slice(start).filter(e=>e.type==='keyState');assert.equal(keys.length,2);assert.equal(keys[0].down,true);assert.equal(keys[1].down,false);
+}
+console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps and function keys with raw down/up events.');

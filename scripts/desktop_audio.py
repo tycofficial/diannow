@@ -49,36 +49,35 @@ class DesktopAudioTrack(MediaStreamTrack):
         try:
             if self.audio.is_format_supported(48000,input_device=int(self.device['index']),input_channels=self.channels,input_format=pyaudio.paInt16):self.rate=48000;self.samples=240
         except ValueError:pass
-        self.frames=queue.Queue(maxsize=2);self.timestamp=0;self.closed=False;self.started=None
+        self.frames=queue.Queue(maxsize=2);self.timestamp=0;self.closed=False;self.started=None;self.capture_position=0
         def callback(data,frame_count,time_info,status):
             if self.closed:return (None,pyaudio.paComplete)
             while self.frames.full():
                 try:self.frames.get_nowait()
                 except queue.Empty:break
-            self.frames.put_nowait(data)
+            self.frames.put_nowait((data,self.capture_position));self.capture_position+=frame_count
             return (None,pyaudio.paContinue)
         self.stream=self.audio.open(format=pyaudio.paInt16,channels=self.channels,rate=self.rate,input=True,input_device_index=int(self.device['index']),frames_per_buffer=self.samples,stream_callback=callback)
     async def recv(self):
-        if self.started is None:self.started=time.perf_counter()
-        pause=self.started+self.timestamp/self.rate-time.perf_counter()
-        if pause>0:await asyncio.sleep(pause)
-        # After a busy event loop resumes, send current audio instead of
-        # rapidly synthesizing all the missed 20 ms frames to catch up.
-        late_samples=int(max(0,time.perf_counter()-self.started-self.timestamp/self.rate)*self.rate)
-        if late_samples>=self.samples*2:
-            self.timestamp+=(late_samples//self.samples)*self.samples
-            while self.frames.qsize()>1:
-                try:self.frames.get_nowait()
-                except queue.Empty:break
-        try:data=self.frames.get_nowait()
-        except queue.Empty:data=bytes(self.samples*self.channels*2)
+        # The WASAPI capture callback is the audio clock. A second wall-clock
+        # pacer used to generate silence between bursts and repeatedly reset
+        # the 44.1kHz resampler under load. Wait for actual captured samples.
+        data,timestamp=await asyncio.to_thread(self.read)
         samples=np.frombuffer(data,dtype=np.int16).reshape(1,-1)
         frame=av.AudioFrame.from_ndarray(samples,format='s16',layout='stereo' if self.channels==2 else 'mono')
-        frame.sample_rate=self.rate;frame.pts=self.timestamp;frame.time_base=fractions.Fraction(1,self.rate);self.timestamp+=frame.samples
+        frame.sample_rate=self.rate;frame.pts=timestamp;frame.time_base=fractions.Fraction(1,self.rate);self.timestamp=timestamp+frame.samples
         return frame
     def read(self):
-        try:return self.frames.get(timeout=.06)
-        except queue.Empty:return bytes(self.samples*self.channels*2)
+        while not self.closed:
+            try:
+                item=self.frames.get(timeout=.1)
+                # At most two capture blocks are retained. Never drain a
+                # historical device backlog after the sender was delayed.
+                if self.frames.full():item=self.frames.get_nowait()
+                return item
+            except queue.Empty:pass
+        from aiortc.mediastreams import MediaStreamError
+        raise MediaStreamError
     def stop(self):
         if self.closed:return
         self.closed=True;super().stop()
