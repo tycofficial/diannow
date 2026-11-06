@@ -2,7 +2,7 @@ import os
 os.environ['OPENBLAS_NUM_THREADS']='1'
 os.environ['OMP_NUM_THREADS']='1'
 import asyncio, concurrent.futures, fractions, json, time, sys, ctypes, getpass, hashlib, uuid, math
-import threading
+import threading,socket
 from collections import deque,OrderedDict
 from pathlib import Path
 import av, dxcam, aiohttp
@@ -23,6 +23,13 @@ from rtp_scheduling import install_cooperative_rtp_send
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
+
+def signaling_proxy():
+    # Scheduled tasks do not inherit the current terminal's proxy variables.
+    # Use the user's already-running local Clash endpoint when it is present.
+    try:
+        with socket.create_connection(('127.0.0.1',7890),timeout=.2):return 'http://127.0.0.1:7890'
+    except OSError:return None
 
 class WindowsTimerResolution:
     def __init__(self,milliseconds=1,winmm=None):self.milliseconds=milliseconds;self.winmm=winmm;self.active=False
@@ -349,14 +356,14 @@ class DesktopSession:
         width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(preferences.get('quality')),self.source_width))
         height=max(2,round(self.source_height*width/self.source_width)//2*2);width=width//2*2
         if not self.camera.is_capturing:self.camera.start(target_fps=min(120,self.refresh),video_mode=True)
-        self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=[RTCIceServer(urls='stun:stun.cloudflare.com:3478')]))
+        self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=getattr(self.owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])))
         self.track=track=DesktopTrack(self.camera,width,height,fps,self.session_id,frame_source=self.owner.frame_source)
         cnames={'video':self.session_id+'-video','audio':self.session_id+'-audio'}
         independent_media_sender(pc.addTrack(track),cnames['video'])
         print(json.dumps({'sessionId':self.session_id,'streamStarted':True,'width':width,'height':height,'targetFps':fps}),flush=True)
         if 'm=audio' in offer.get('sdp',''):
             try:
-                audio=await self.owner.media_devices.open(DesktopAudioTrack,'stop')
+                audio=await asyncio.wait_for(self.owner.media_devices.open(DesktopAudioTrack,'stop'),4)
                 if self.closed:
                     await self.owner.media_devices.call(audio.stop)
                     raise RuntimeError('Desktop session closed during audio setup.')
@@ -364,14 +371,16 @@ class DesktopSession:
                 independent_media_sender(pc.addTrack(audio),cnames['audio']);self.audio_error=None
             except Exception as error:self.audio_error=str(error);print(json.dumps({'desktopAudioError':str(error)}),flush=True)
         if self.closed:raise RuntimeError('Desktop session closed during media setup.')
-        sink=await self.owner.media_devices.open(MicrophoneSink,'close')
-        if self.closed:
-            await self.owner.media_devices.call(sink.close)
-            raise RuntimeError('Desktop session closed during microphone setup.')
-        self.mic_sink=sink
+        try:
+            sink=await asyncio.wait_for(self.owner.media_devices.open(MicrophoneSink,'close'),4)
+            if self.closed:
+                await self.owner.media_devices.call(sink.close)
+                raise RuntimeError('Desktop session closed during microphone setup.')
+            self.mic_sink=sink
+        except Exception as error:print(json.dumps({'microphoneSetupError':type(error).__name__,'message':str(error)}),flush=True)
         @pc.on('track')
         def on_remote_track(remote_track):
-            if remote_track.kind=='audio':self.mic_task=asyncio.create_task(self.mic_sink.consume(remote_track))
+            if remote_track.kind=='audio' and self.mic_sink:self.mic_task=asyncio.create_task(self.mic_sink.consume(remote_track))
         for transceiver in pc.getTransceivers():
             if transceiver.kind=='video':transceiver.setCodecPreferences([codec for codec in RTCRtpSender.getCapabilities('video').codecs if codec.mimeType.lower()=='video/h264'])
         @pc.on('datachannel')
@@ -404,6 +413,7 @@ class DesktopSession:
                             except Exception as error:input_result(event.get('id'),str(error))
                         asyncio.create_task(change_display())
                     elif event.get('type')=='disconnect':asyncio.create_task(self.close())
+                    elif event.get('type')=='microphoneState':self.owner.audio_router.set_microphone(self.session_id,bool(event.get('enabled')))
                     else:
                         if event.get('type')=='move' and event.get('seq'):
                             if event['seq']<=self.move_sequence:return
@@ -412,7 +422,9 @@ class DesktopSession:
                         self.input.submit(event,input_result)
                 except Exception:pass
             @channel.on('close')
-            def on_close():self.input.release_owner(self.session_id)
+            def on_close():
+                self.input.release_owner(self.session_id)
+                if channel.label=='input':self.owner.audio_router.set_microphone(self.session_id,False)
         @pc.on('connectionstatechange')
         async def on_state():
             print(json.dumps({'sessionId':self.session_id,'connection':pc.connectionState}),flush=True)
@@ -440,6 +452,7 @@ class DesktopSession:
     async def _close(self):
         if self.closed:return
         self.closed=True
+        self.owner.audio_router.set_microphone(self.session_id,False)
         self.input.release_owner(self.session_id)
         if self.watchdog and self.watchdog is not asyncio.current_task():self.watchdog.cancel()
         self.watchdog=None;self.answer_result=None
@@ -484,17 +497,19 @@ class DesktopAgent:
         else:self.input.disable()
     async def answer(self,offer,session_id=None):
         for session in list(self.sessions):
-            if session.expired():await session.close()
+            if session.expired() and not session.closed:
+                try:await asyncio.wait_for(session.close(),2)
+                except asyncio.TimeoutError:pass
         if session_id:
             for session in self.sessions:
                 if session.session_id==session_id and session.answer_result is not None:return session.answer_result
-        if len(self.sessions)>=4:raise RuntimeError('Too many active desktop viewers. Close an unused viewer and retry.')
+        if sum(not session.closed for session in self.sessions)>=4:raise RuntimeError('Too many active desktop viewers. Close an unused viewer and retry.')
         session=DesktopSession(self,session_id);self.sessions.append(session)
         try:
             session.answer_result=await session.answer(offer)
             return session.answer_result
         except BaseException:
-            await session.close();raise
+            asyncio.create_task(session.close());raise
     async def close(self):
         self.closed=True
         for session in list(self.sessions):await session.close()
@@ -528,26 +543,42 @@ async def run_agent():
             if token:auth_headers['OAI-Sites-Authorization']='Bearer '+token
             if agent_key:auth_headers['X-Agent-Key']=agent_key
             async with aiohttp.ClientSession(headers=auth_headers,timeout=timeout,trust_env=True,cookie_jar=aiohttp.DummyCookieJar()) as session:
-                heartbeat_at=0
+                heartbeat_at=0;ice_refresh=0;proxy=signaling_proxy()
                 while not agent.closed:
                     if (DISPLAY_STATE/'engine-stop.request').exists():break
                     if time.monotonic()-heartbeat_at>=5:
                         print(json.dumps({'engineHeartbeat':True}),flush=True);heartbeat_at=time.monotonic()
+                    phase='poll';started=time.monotonic()
                     try:
-                        async with session.get(url+'/api/agent/poll') as response:
+                        if time.monotonic()-ice_refresh>60:
+                            ice_refresh=time.monotonic();phase='ice-config'
+                            async with session.get(url+'/api/ice',proxy=proxy) as response:
+                                if response.status==200:
+                                    ice=await response.json();servers=[]
+                                    for server in ice.get('iceServers',[]):
+                                        urls=server.get('urls',[]);urls=[urls] if isinstance(urls,str) else urls
+                                        tcp=[value for value in urls if value.startswith('turn') and ('transport=tcp' in value or value.startswith('turns:'))]
+                                        if tcp:servers.append(RTCIceServer(urls=tcp,username=server.get('username'),credential=server.get('credential')))
+                                    if servers:agent.ice_servers=servers
+                        phase='poll'
+                        async with session.get(url+'/api/agent/poll',proxy=proxy) as response:
                             if response.status!=200:raise RuntimeError('Private Site authorization: HTTP '+str(response.status))
                             pending=await response.json()
                         if not getattr(agent,'service_authenticated',False):
                             agent.service_authenticated=True;print(json.dumps({'serviceAuthenticated':True,'waitingForViewer':True}),flush=True)
                         if pending.get('id') and pending['id']!=seen and time.time()*1000-pending.get('createdAt',0)<60000:
+                            phase='answer-create';print(json.dumps({'answerStarted':pending['id']}),flush=True)
                             answer=await asyncio.wait_for(agent.answer(pending['offer'],session_id=pending['id']),20)
-                            async with session.post(url+'/api/answer/'+pending['id'],json=answer) as response:
+                            phase='answer-publish'
+                            async with session.post(url+'/api/answer/'+pending['id'],json=answer,proxy=proxy) as response:
                                 if response.status!=200:raise RuntimeError('Could not publish WebRTC answer.')
                             print(json.dumps({'sessionReady':pending['id']}),flush=True)
                             seen=pending['id']
                         await asyncio.sleep(.4)
                     except Exception as error:
-                        print(json.dumps({'signalingError':type(error).__name__,'message':str(error)}),flush=True);await asyncio.sleep(2)
+                        print(json.dumps({'signalingError':type(error).__name__,'phase':phase,'seconds':round(time.monotonic()-started,2),'message':str(error)}),flush=True)
+                        if phase in ['poll','ice-config','answer-publish']:proxy=signaling_proxy()
+                        await asyncio.sleep(2)
     finally:await agent.close()
 
 if __name__=='__main__':

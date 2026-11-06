@@ -59,7 +59,7 @@ async def main():
 
         # An interrupted caller cannot interrupt the actual session cleanup.
         owner_devices=MediaDevices();device=await owner_devices.open(DeviceDouble,'close')
-        owner=SimpleNamespace(camera=SimpleNamespace(is_capturing=False),input=None,source_width=1920,source_height=1080,refresh=60,media_devices=owner_devices,sessions=[],update_input_state=lambda:None)
+        owner=SimpleNamespace(camera=SimpleNamespace(is_capturing=False),audio_router=SimpleNamespace(set_microphone=lambda *args:None),input=SimpleNamespace(release_owner=lambda *args:None),source_width=1920,source_height=1080,refresh=60,media_devices=owner_devices,sessions=[],update_input_state=lambda:None)
         session=DesktopSession(owner);owner.sessions.append(session);session.mic_sink=device
         closing=asyncio.create_task(session.close());await asyncio.sleep(.005);closing.cancel()
         await asyncio.gather(closing,return_exceptions=True);await session.close()

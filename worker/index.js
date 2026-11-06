@@ -45,11 +45,17 @@ export default {
     if(path.startsWith('/s/')&&request.method==='GET')return Response.redirect(url.origin+'/',302);
     if(!path.startsWith('/api/'))return json({error:'Not found'},404);
     if(origin&&!allowedOrigins.has(origin))return json({error:'Origin is not allowed.'},403);
+    if(path==='/api/ice'&&request.method==='GET'){
+      let configured=[];try{configured=JSON.parse(env.TURN_ICE_SERVERS_JSON||'[]')}catch{}
+      const iceServers=Array.isArray(configured)?configured.filter(server=>server&&typeof server.username==='string'&&typeof server.credential==='string'&&(Array.isArray(server.urls)?server.urls:[server.urls]).every(value=>typeof value==='string'&&/^turns?:[^\s]+$/.test(value))):[];
+      return json({iceServers:[{urls:'stun:stun.cloudflare.com:3478'},...iceServers],relayAvailable:iceServers.length>0});
+    }
     if(path==='/api/client-report'&&request.method==='POST'){
       const raw=await request.text();if(raw.length>2000)return json({error:'Report too large'},413);
       let value;try{value=JSON.parse(raw)}catch{return json({error:'Invalid report'},400)}
       if(!['boot','ready','connecting','offer-created','offer-sent','answer-received','connected','startup-error','connection-error'].includes(value.stage))return json({error:'Invalid stage'},400);
-      console.error('viewer-diagnostic',JSON.stringify({stage:value.stage,error:String(value.error||'').slice(0,300),rtc:String(value.rtc||'').slice(0,20),secure:!!value.secure,embedded:!!value.embedded}));
+      const log=value.error?console.error:console.log;
+      log('viewer-diagnostic',JSON.stringify({stage:value.stage,error:String(value.error||'').slice(0,300),rtc:String(value.rtc||'').slice(0,20),secure:!!value.secure,embedded:!!value.embedded}));
       return new Response(null,{status:204,headers});
     }
     if(!env.BUCKET)return json({error:'Signaling storage is not ready.'},503);

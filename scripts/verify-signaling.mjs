@@ -18,6 +18,9 @@ const call=(path,method='GET',role=null,body=null,origin=null)=>{
  return worker.fetch(new Request('https://screen.example'+path,{method,headers,...(body?{body:JSON.stringify(body)}:{})}),env);
 };
 assert.equal((await call('/')).status,200);
+assert.equal((await (await call('/api/ice')).json()).relayAvailable,false);
+env.TURN_ICE_SERVERS_JSON=JSON.stringify([{urls:['turn:relay.example:3478?transport=tcp'],username:'test',credential:'test'}]);
+assert.equal((await (await call('/api/ice','GET',null,null,'https://tycofficial.github.io')).json()).relayAvailable,true);
 let response=await call('/api/offer','POST',null,{type:'offer',sdp:'v=0'});assert.equal(response.status,200);const {id}=await response.json();
 assert.equal((await call('/api/agent/poll','GET','viewer')).status,403);
 assert.equal((await (await call('/api/agent/poll','GET','agent')).json()).id,id);

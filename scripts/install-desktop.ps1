@@ -1,8 +1,9 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿param([switch]$RuntimeOnly)
+$ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
 $principal=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
-    $arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$PSCommandPath+'"'
+    $arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$PSCommandPath+'"'+$(if($RuntimeOnly){' -RuntimeOnly'}else{''})
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -Wait
     exit
 }
@@ -19,7 +20,7 @@ $desktopExe=Join-Path ([Environment]::GetFolderPath('Desktop')) '远程桌面.ex
 $report=Join-Path $stateDir 'installation-result.json'
 try{
  if(-not(Test-Path -LiteralPath $sourceExe) -or -not(Test-Path -LiteralPath (Join-Path $sourceHost 'RemoteDesktop.exe')) -or -not(Test-Path -LiteralPath $configuration)){throw 'Build or connection configuration missing.'}
- & (Join-Path $PSScriptRoot 'install-signed-drivers.ps1')
+ if(-not $RuntimeOnly){ & (Join-Path $PSScriptRoot 'install-signed-drivers.ps1') }
  $driverCode=0
  $backupDir=Join-Path $appDir ('backups\'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
  New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
@@ -75,9 +76,11 @@ try{
 </Task>
 "@
  Register-ScheduledTask -TaskName CodexDesktopViewer -Xml $xml -Force | Out-Null
+ $networkError=$null
+ try{ & (Join-Path $PSScriptRoot 'configure-desktop-network.ps1') }catch{ $networkError=$_.Exception.Message }
  Start-ScheduledTask -TaskName CodexDesktopViewer
- @{ok=$true;desktop=$desktopExe;installed=$installedExe;backup=$backupDir;driverCode=$driverCode;runLevel='HighestAvailable';updated=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $report -Encoding utf8
+ @{ok=$true;desktop=$desktopExe;installed=$installedExe;backup=$backupDir;driverCode=$driverCode;networkError=$networkError;runLevel='HighestAvailable';updated=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $report -Encoding utf8
 }catch{
- @{ok=$false;error=$_.Exception.Message;updated=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $report -Encoding utf8
+ @{ok=$false;error=$_.Exception.Message;position=$_.InvocationInfo.PositionMessage;stack=$_.ScriptStackTrace;updated=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $report -Encoding utf8
  throw
 }

@@ -17,7 +17,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   class Peer{
     iceGatheringState='complete';connectionState='new';
     remoteDescriptions=0;
-    constructor(){peers.push(this)}
+    constructor(config){this.config=config;peers.push(this)}
     createDataChannel(label){const channel={label,readyState:'open',bufferedAmount:0,send(value){if(channel.fail)throw new Error('Data channel failed');sent.push(JSON.parse(value))}};channels.push(channel);return channel}
     addTransceiver(){return {sender:{}}}
     async createOffer(){return {type:'offer',sdp:'test-sdp'}}
@@ -37,7 +37,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
     location:{hostname:'screen.example'},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
-    fetch:async(path,options)=>{requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
+    fetch:async(path,options)=>{if(path.endsWith('/api/ice'))return {ok:true,json:async()=>({iceServers:[{urls:'turn:relay.example:3478?transport=tcp',username:'test',credential:'test'}],relayAvailable:true})};requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
   // Reproduce a host that already has common top-level names. Viewer must stay scoped.
   vm.runInContext('const video=1, keys=2, pc=3;',context);
   for(const script of sources)vm.runInContext(script,context);
@@ -55,6 +55,8 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
 }
 const connected=await start(true);
 assert(connected.stages.includes('connected'));
+assert.equal(connected.peers[0].config.iceServers[0].username,'test');
+assert.equal(connected.peers[0].config.iceTransportPolicy,'all');
 assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'720');
 assert.equal(connected.requests[0].options.credentials,'omit');
 const unavailable=await start(false);
@@ -74,7 +76,7 @@ async function pendingAnswer(){
 }
 for(const status of [503,200]){
   const viewer=await pendingAnswer();
-  await viewer.fireTimer(30000);await viewer.fireTimer(3000);
+  await viewer.fireTimer(30000);await viewer.fireTimer(1000);
   assert.match(viewer.nodes.status.textContent,/已连接/);
   assert.equal(viewer.peers.length,2);
   const state={status:viewer.nodes.status.textContent,overlay:viewer.nodes.overlay.textContent,stages:viewer.stages.length,timers:new Set(viewer.timers.keys())};
@@ -83,7 +85,7 @@ for(const status of [503,200]){
   assert.equal(viewer.nodes.overlay.textContent,state.overlay,'A stale answer must preserve the new connection overlay');
   assert.equal(viewer.stages.length,state.stages,'A stale answer must not emit connection stages');
   assert.equal(viewer.peers[0].remoteDescriptions,0,'A stale success must not answer the closed peer');
-  assert(![...viewer.timers].some(([id,timer])=>!state.timers.has(id)&&[3000,5000].includes(timer.delay)),'A stale answer must not schedule another retry');
+  assert(![...viewer.timers].some(([id,timer])=>!state.timers.has(id)&&[1000,5000].includes(timer.delay)),'A stale answer must not schedule another retry');
 }
 {
   const viewer=await pendingAnswer();
@@ -95,7 +97,7 @@ for(const status of [503,200]){
   assert.equal(viewer.nodes.overlay.textContent,state.overlay);
   assert.equal(viewer.stages.length,state.stages);
   assert.equal(viewer.peers[0].remoteDescriptions,0,'A late answer must not reopen the disconnected peer');
-  assert(![...viewer.timers].some(([id,timer])=>!state.timers.has(id)&&[3000,5000].includes(timer.delay)),'A late answer must not reconnect after intentional disconnect');
+  assert(![...viewer.timers].some(([id,timer])=>!state.timers.has(id)&&[1000,5000].includes(timer.delay)),'A late answer must not reconnect after intentional disconnect');
 }
 {
   const viewer=await start(true),{nodes,dispatch,sent}=viewer;
@@ -166,7 +168,7 @@ for(const status of [503,200]){
   await viewer.intervals[0]();assert.equal(reports().length,1,'Receiver reports must be throttled rather than sent every second');
   viewer.advanceTime(5000);await viewer.intervals[0]();assert.equal(reports().length,2);assert.equal(reports()[1].receiverReport.bufferMs,null,'Unsupported buffer statistics must be reported as unknown');
   const videoStream=nodes.screen.srcObject,audioStream=nodes.desktopAudio.srcObject;
-  peer.connectionState='failed';peer.onconnectionstatechange();await viewer.fireTimer(3000);
+  peer.connectionState='failed';peer.onconnectionstatechange();await viewer.fireTimer(1000);
   assert.equal(videoTrack.stopped,true);assert.equal(audioTrack.stopped,true);assert.equal(otherVideo.stopped,true);
   assert.notEqual(nodes.screen.srcObject,videoStream);assert.notEqual(nodes.desktopAudio.srcObject,audioStream);
   assert.equal(nodes.screen.srcObject.getTracks().length,0);assert.equal(nodes.desktopAudio.srcObject.getTracks().length,0);
@@ -234,7 +236,7 @@ function attachAudio(viewer){const peer=viewer.peers.at(-1),track={kind:'audio',
   assert.equal(report.audioEnabled,1);assert.equal(report.audioContextState,1);assert.equal(report.audioOutputMode,1);assert.equal(report.audioElementMuted,1);
   await viewer.nodes.audio.onclick();assert.equal(context.sources[0].disconnected,true);assert.equal(audio.muted,true);assert.equal(viewer.nodes.audio.textContent,'开启声音');
   await viewer.nodes.audio.onclick();assert.equal(mock.contexts.length,1);assert.equal(context.resumeCalls,1,'Unmuting an already running context must reuse the unlocked context');
-  const oldSource=context.sources.at(-1);viewer.peers[0].connectionState='failed';viewer.peers[0].onconnectionstatechange();await viewer.fireTimer(3000);
+  const oldSource=context.sources.at(-1);viewer.peers[0].connectionState='failed';viewer.peers[0].onconnectionstatechange();await viewer.fireTimer(1000);
   assert.equal(oldSource.disconnected,true,'Reconnection must disconnect the old stream immediately');attachAudio(viewer);await flush();
   assert.equal(mock.contexts.length,1);assert.equal(context.resumeCalls,1,'Reconnection must not attempt resume without a user gesture');assert.equal(context.sources.at(-1).stream,audio.srcObject);assert.equal(audio.muted,true);
   await viewer.nodes.stop.onclick();assert.equal(context.sources.at(-1).disconnected,true);assert.equal(audio.srcObject,null);

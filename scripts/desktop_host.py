@@ -17,6 +17,7 @@ CONFIG_PATH=STATE_DIR/'connection.dpapi'
 PROTECTED_DIR=Path(os.environ.get('ProgramFiles','C:/Program Files'))/'DiannaoRemoteDesktop'
 PROTECTED_CONFIG=Path(os.environ.get('PROGRAMDATA','C:/ProgramData'))/'DiannaoRemoteDesktop'/getpass.getuser()/'connection.dpapi'
 MUTEX_NAME='Local\\CodexDesktopSupervisor_tianw_1105'
+HEARTBEAT_NAME='Local\\CodexDesktopHeartbeat_tianw_1105'
 CREATE_NO_WINDOW=0x08000000
 
 class Blob(ctypes.Structure):
@@ -39,8 +40,21 @@ def load_configuration():
     return config
 
 def atomic_json(path,value):
-    path.parent.mkdir(parents=True,exist_ok=True)
-    temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(value,ensure_ascii=False),encoding='utf-8');temporary.replace(path)
+    temporary=path.with_name(path.name+'.'+str(os.getpid())+'.tmp')
+    try:
+        path.parent.mkdir(parents=True,exist_ok=True)
+        temporary.write_text(json.dumps(value,ensure_ascii=False),encoding='utf-8')
+    except OSError:return False
+    # Windows readers may open without FILE_SHARE_DELETE. A status observer
+    # must never be able to crash the media worker or its supervisor.
+    for attempt in range(6):
+        try:temporary.replace(path);return True
+        except PermissionError:
+            if attempt<5:time.sleep(.01*(attempt+1))
+        except OSError:break
+    try:temporary.unlink(missing_ok=True)
+    except OSError:pass
+    return False
 
 def read_json(path):
     try:return json.loads(path.read_text(encoding='utf-8'))
@@ -55,6 +69,10 @@ def kernel():
     result=ctypes.WinDLL('kernel32',use_last_error=True)
     result.CreateMutexW.argtypes=[ctypes.c_void_p,wintypes.BOOL,wintypes.LPCWSTR];result.CreateMutexW.restype=wintypes.HANDLE
     result.CloseHandle.argtypes=[wintypes.HANDLE]
+    result.CreateEventW.argtypes=[ctypes.c_void_p,wintypes.BOOL,wintypes.BOOL,wintypes.LPCWSTR];result.CreateEventW.restype=wintypes.HANDLE
+    result.OpenEventW.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.LPCWSTR];result.OpenEventW.restype=wintypes.HANDLE
+    result.SetEvent.argtypes=[wintypes.HANDLE]
+    result.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD];result.WaitForSingleObject.restype=wintypes.DWORD
     return result
 
 def claim_mutex():
@@ -103,17 +121,19 @@ def supervise():
     mutex=claim_mutex()
     if mutex is None:return
     api,job=make_job();process=None
+    heartbeat=api.CreateEventW(None,False,False,HEARTBEAT_NAME)
+    if not heartbeat:raise ctypes.WinError(ctypes.get_last_error())
     try:
         load_configuration()  # Verify before starting any capture process.
         for name in ['stop.request','restart.request']:(STATE_DIR/name).unlink(missing_ok=True)
         api.SetThreadExecutionState(0x80000001)
         log('host-started',pid=os.getpid(),frozen=bool(getattr(sys,'frozen',False)))
-        last_tick=time.monotonic();restart_at=0
+        last_tick=time.monotonic();last_heartbeat=last_tick;restart_at=0
         while True:
             now=time.monotonic()
             if (STATE_DIR/'stop.request').exists():break
-            heartbeat=read_json(STATE_DIR/'engine-status.json')
-            stalled=bool(process and heartbeat.get('pid')==process.pid and time.time()-heartbeat.get('updated',time.time())>55)
+            if api.WaitForSingleObject(heartbeat,0)==0:last_heartbeat=now
+            stalled=bool(process and now-last_heartbeat>55)
             requested=(STATE_DIR/'restart.request').exists() or stalled
             if resumed(last_tick,now) or requested:
                 (STATE_DIR/'restart.request').unlink(missing_ok=True)
@@ -127,6 +147,7 @@ def supervise():
             if process is None and now>=restart_at:
                 (STATE_DIR/'engine-stop.request').unlink(missing_ok=True)
                 process=subprocess.Popen(own_command('--agent'),cwd=APP_DIR,creationflags=CREATE_NO_WINDOW,close_fds=True)
+                last_heartbeat=now
                 if not api.AssignProcessToJobObject(job,int(process._handle)):
                     process.kill();raise ctypes.WinError(ctypes.get_last_error())
                 log('engine-started',pid=process.pid)
@@ -136,12 +157,13 @@ def supervise():
         if process and process.poll() is None:
             stop_engine(process,api,job)
         atomic_json(STATE_DIR/'host-status.json',{'running':False,'updated':time.time()})
-        api.SetThreadExecutionState(0x80000000);api.CloseHandle(job);api.CloseHandle(mutex)
+        api.SetThreadExecutionState(0x80000000);api.CloseHandle(job);api.CloseHandle(mutex);api.CloseHandle(heartbeat)
         log('host-stopped')
 
 class AgentOutput:
     encoding='utf-8'
     def __init__(self):
+        self.api=kernel();self.heartbeat=self.api.OpenEventW(2,False,HEARTBEAT_NAME)
         STATE_DIR.mkdir(parents=True,exist_ok=True);path=STATE_DIR/'exe-agent.log'
         if path.exists() and path.stat().st_size>5_000_000:path.replace(path.with_suffix('.previous.log'))
         self.stream=path.open('a',encoding='utf-8',buffering=1);self.pending='';self.lock=threading.RLock()
@@ -153,6 +175,7 @@ class AgentOutput:
                 try:message=json.loads(line)
                 except ValueError:continue
                 if message.get('serviceAuthenticated') or message.get('engineHeartbeat'):
+                    if self.heartbeat:self.api.SetEvent(self.heartbeat)
                     state=read_json(STATE_DIR/'engine-status.json')
                     if message.get('serviceAuthenticated'):state['authenticated']=True
                     state.update(pid=os.getpid(),updated=time.time())

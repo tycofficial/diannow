@@ -121,23 +121,51 @@ class CoreAudio:
         return result
     def close(self):release(self.factory);release(self.enumerator);self.ole.CoUninitialize()
 
+class MicrophoneRouting:
+    def __init__(self):self.saved={}
+    def apply(self,core,capture,mic,enabled):
+        physical=next((identifier for name,identifier in capture if any(word in name.lower() for word in ['microphone','麦克风']) and not any(word in name.lower() for word in ['cable','virtual'])),None)
+        # Repair defaults left pointing at a virtual input by older versions.
+        if not self.saved and not enabled and physical:
+            virtual={identifier for name,identifier in capture if 'cable' in name.lower()}
+            for role in range(3):
+                if core.default(1,role) in virtual:core.set_default(physical,role)
+        if enabled and mic and not self.saved:
+            self.saved={role:core.default(1,role) for role in range(3)}
+            for role in range(3):core.set_default(mic,role)
+        elif not enabled and self.saved:
+            for role,identifier in self.saved.items():core.set_default(identifier,role)
+            self.saved.clear()
+    def restore(self,core):
+        for role,identifier in self.saved.items():
+            try:core.set_default(identifier,role)
+            except OSError:pass
+        self.saved.clear()
+
 class AudioRouter:
-    def __init__(self):self.stop_event=threading.Event();self.thread=None;self.ready=False;self.microphone_ready=False;self.error=None
+    def __init__(self):
+        self.stop_event=threading.Event();self.wake_event=threading.Event();self.lock=threading.Lock();self.microphone_owners=set();self.thread=None;self.ready=False;self.microphone_ready=False;self.error=None
+    def set_microphone(self,owner,enabled):
+        with self.lock:
+            if enabled:self.microphone_owners.add(owner)
+            else:self.microphone_owners.discard(owner)
+        self.wake_event.set()
     def start(self):
         if self.thread:return
         self.thread=threading.Thread(target=self.run,name='IndependentAudioRouting',daemon=True);self.thread.start()
     def run(self):
-        core=None;saved={};defaults={}
+        core=None;saved={};microphone=MicrophoneRouting();last_routes=0
         try:
             core=CoreAudio()
             while not self.stop_event.is_set():
                 render=endpoints(0);capture=endpoints(1)
                 desktop=next((identifier for name,identifier in render if 'hi-fi cable input' in name.lower()),None)
                 mic=next((identifier for name,identifier in capture if 'cable output' in name.lower() and 'hi-fi' not in name.lower()),None)
-                if mic and not self.microphone_ready:
-                    for role in range(3):defaults[role]=core.default(1,role);core.set_default(mic,role)
-                    self.microphone_ready=True
-                if desktop:
+                self.microphone_ready=bool(mic)
+                with self.lock:enabled=bool(self.microphone_owners)
+                microphone.apply(core,capture,mic,enabled)
+                if desktop and time.monotonic()-last_routes>=1:
+                    last_routes=time.monotonic()
                     core.normalize_virtual(desktop)
                     for name,identifier in render:
                         for pid in core.processes(identifier):
@@ -148,7 +176,7 @@ class AudioRouter:
                                 saved[pid]=previous
                             except OSError:continue  # exited/system sessions can reject per-app routing
                     self.ready=True
-                self.stop_event.wait(1)
+                self.wake_event.wait(1);self.wake_event.clear()
         except Exception as error:self.error=str(error)
         finally:
             if core:
@@ -156,12 +184,11 @@ class AudioRouter:
                     for role,value in previous.items():
                         try:core.set_route(pid,role,value,packed=True)
                         except OSError:pass
-                for role,value in defaults.items():
-                    try:core.set_default(value,role)
-                    except OSError:pass
+                microphone.restore(core)
                 core.close()
     def close(self):
         self.stop_event.set()
+        self.wake_event.set()
         if self.thread:self.thread.join(timeout=4)
 
 if __name__=='__main__':
