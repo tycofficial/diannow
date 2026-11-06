@@ -12,7 +12,19 @@ $oldTask = Get-ScheduledTask -TaskName CodexDesktopViewer -ErrorAction SilentlyC
 if ($oldTask) { Export-ScheduledTask -TaskName CodexDesktopViewer | Set-Content -LiteralPath (Join-Path $backupDir 'previous-task.xml') -Encoding Unicode }
 if (Test-Path -LiteralPath $desktopExe) { Copy-Item -LiteralPath $desktopExe -Destination (Join-Path $backupDir 'previous-desktop.exe') }
 if (Test-Path -LiteralPath $installedExe) { Copy-Item -LiteralPath $installedExe -Destination (Join-Path $backupDir 'previous-host.exe') }
-if ($oldTask) { Stop-ScheduledTask -TaskName CodexDesktopViewer; Start-Sleep -Seconds 2 }
+$stateDir=Join-Path $appDir 'desktop-service'
+New-Item -ItemType File -Path (Join-Path $stateDir 'stop.request') -Force | Out-Null
+$deadline=(Get-Date).AddSeconds(20)
+do {
+    $owned=@(Get-Process -Name RemoteDesktop -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $installedExe})
+    if(-not $owned.Count){break}
+    Start-Sleep -Milliseconds 250
+}while((Get-Date) -lt $deadline)
+if ($oldTask) { Stop-ScheduledTask -TaskName CodexDesktopViewer }
+# A frozen bootloader can leave its worker alive when the scheduler stops only
+# the outer process. Scope any remaining cleanup to this installed executable.
+Get-Process -Name RemoteDesktop -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $installedExe} | Stop-Process -Force
+Start-Sleep -Seconds 1
 Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
 Copy-Item -LiteralPath $sourceExe -Destination $desktopExe -Force
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
