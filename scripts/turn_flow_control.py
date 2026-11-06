@@ -7,11 +7,12 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
         existing['videoPayloadTypes'].update(video_payload_types)
         if video_sender is not None:existing['videoSenders'].append(video_sender)
         return existing
-    state={'videoPayloadTypes':set(video_payload_types),'videoSenders':[video_sender] if video_sender is not None else [],'waits':0,'skippedStaleRetransmits':0,'maxQueuedBytes':0,'configuredWriters':set(),'lastLog':0.0,'nextPacketAt':0.0,'audioEnabled':False,'pacingBitsPerSecond':0}
+    state={'videoPayloadTypes':set(video_payload_types),'videoSenders':[video_sender] if video_sender is not None else [],'waits':0,'skippedStaleRetransmits':0,'maxQueuedBytes':0,'configuredWriters':set(),'lastLog':0.0,'nextPacketAt':0.0,'audioEnabled':False,'pacingBitsPerSecond':0,'relayed':False}
     dtls._turn_video_flow=state;original=dtls._send_rtp
     def queue_size():
         queued=0
         for pair in dtls.transport._connection._nominated.values():
+            state['relayed']=state['relayed'] or any(getattr(getattr(pair,name,None),'type',None)=='relay' for name in ['local_candidate','remote_candidate'])
             inner=getattr(pair.protocol.transport,'_TurnTransport__inner_protocol',None)
             writer=getattr(inner,'transport',None)
             if writer is None or not hasattr(writer,'get_write_buffer_size'):continue
@@ -39,17 +40,15 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
                 if now-state['lastLog']>5:
                     state['lastLog']=now;print(json.dumps({'turnVideoBackpressure':True,'queuedBytes':queue_size(),'maxQueuedBytes':state['maxQueuedBytes']}),flush=True)
                 await asyncio.sleep(.005)
-            if primary and state['configuredWriters']:
+            if primary and (state['configuredWriters'] or state['relayed']):
                 # The relay's outgoing queue is beyond our local TCP socket.
                 # Respect receiver bandwidth feedback as well as local drain.
                 encoder=getattr(video_sender,'_RTCRtpSender__encoder',None) if video_sender else None
                 estimate=getattr(encoder,'requested_bitrate',2500000)
-                rtt=getattr(video_sender,'_RTCRtpSender__rtt',None) if video_sender else None
-                # A static screen's REMB is often its offered bitrate rather
-                # than link capacity. Keep a usable startup budget; only use
-                # the low estimate when actual round-trip delay confirms a queue.
-                floor=200000 if rtt is not None and rtt>1.5 else 1500000
-                budget=max(64000,min(8000000,max(floor,estimate*.8))-(160000 if state['audioEnabled'] else 0))
+                # A remote TURN/TCP queue exists even when our own leg is UDP.
+                # Pace both relay directions, and do not enforce a 1.5Mbps
+                # floor when the receiver has asked for a much lower rate.
+                budget=max(96000,min(8000000,estimate*1.1)-(160000 if state['audioEnabled'] else 0))
                 state['pacingBitsPerSecond']=round(budget)
                 delay=state['nextPacketAt']-time.monotonic()
                 if delay>0:await asyncio.sleep(delay)

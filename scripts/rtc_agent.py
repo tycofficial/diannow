@@ -123,6 +123,17 @@ class FastH264Encoder(H264Encoder):
         self.delivery=metadata.get('delivery')
         if self.delivery:self.delivery.bandwidth=self.target_bitrate
         if self.codec and (self.codec.width!=frame.width or self.codec.height!=frame.height):self.codec=None
+        if self.codec and self.codec.name=='h264_amf':
+            applied=getattr(self,'applied_bitrate',self.codec.bit_rate);elapsed=time.monotonic()-self.created
+            # Setting AVCodecContext.bit_rate alone does not reconfigure AMF.
+            # Apply substantial decreases promptly and increases gradually;
+            # every replacement starts with complete decoder refresh headers.
+            if (self.target_bitrate<applied*.75 and elapsed>=.5) or (self.target_bitrate>applied*1.35 and elapsed>=4):
+                self.codec=None;force_keyframe=True
+        frame_seconds=float(frame.pts*frame.time_base) if frame.pts is not None and frame.time_base else time.monotonic()
+        last_refresh=getattr(self,'last_keyframe_seconds',None)
+        force_keyframe=last_refresh is None or frame_seconds-last_refresh>=2 or (force_keyframe and frame_seconds-last_refresh>=.25)
+        if force_keyframe:self.last_keyframe_seconds=frame_seconds
         frame.pict_type=av.video.frame.PictureType.I if force_keyframe else av.video.frame.PictureType.NONE
         if self.codec is None:
             encoders=['h264_amf','libx264'] if frame.format.name=='bgra' and not getattr(self,'hardware_failed',False) else ['libx264']
@@ -133,21 +144,29 @@ class FastH264Encoder(H264Encoder):
                     codec.framerate=fractions.Fraction(int(target_fps));codec.time_base=fractions.Fraction(1,90000);codec.gop_size=120;codec.max_b_frames=0
                     if encoder=='libx264':codec.profile='Baseline'
                     level='6.0' if frame.width*frame.height*target_fps>3840*2160*60 else ('5.2' if frame.width*frame.height>1920*1080 else '4.2')
-                    codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cbr','profile':'constrained_baseline'} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
-                    codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic()
+                    codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cbr','profile':'constrained_baseline','forced_idr':'1','async_depth':'1','enforce_hrd':'1','filler_data':'0','max_au_size':str(max(64000,self.target_bitrate//4))} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
+                    codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic();self.applied_bitrate=self.target_bitrate;self.parameter_sets={}
                     print(json.dumps({'encoder':encoder,'targetFps':target_fps,'sessionId':metadata.get('sessionId')}),flush=True);break
                 except Exception as error:
                     if encoder=='h264_amf':self.hardware_failed=True
                     print(json.dumps({'encoderFallback':encoder,'reason':str(error)}),flush=True)
             if self.codec is None:raise RuntimeError('No H264 encoder is available.')
         if self.codec.pix_fmt!=frame.format.name:frame=frame.reformat(format=self.codec.pix_fmt,threads=4)
-        self.codec.bit_rate=self.target_bitrate
+        if self.codec.name!='h264_amf':self.codec.bit_rate=self.target_bitrate
         started=time.perf_counter();packets=self.codec.encode(frame)
         self.encode_total=getattr(self,'encode_total',0)+(time.perf_counter()-started);self.encode_count=getattr(self,'encode_count',0)+1
         if self.encode_count%300==0:print(json.dumps({'encodeMs':round(1000*self.encode_total/self.encode_count,2),'sessionId':metadata.get('sessionId')}),flush=True)
         data=b''.join(bytes(packet) for packet in packets)
         if self.delivery and not any(packet.is_keyframe for packet in packets):self.delivery.observe(len(data))
-        if data:yield from self._split_bitstream(data)
+        if data:
+            units=list(self._split_bitstream(data));parameters=getattr(self,'parameter_sets',{})
+            for unit in units:
+                if unit[0]&31 in [7,8]:parameters[unit[0]&31]=unit
+            self.parameter_sets=parameters
+            if any(unit[0]&31==5 for unit in units):
+                present={unit[0]&31 for unit in units}
+                units=[parameters[kind] for kind in [7,8] if kind not in present and kind in parameters]+units
+            yield from units
 
 original_encoder=aiortc.codecs.get_encoder
 def encoder_factory(codec):
@@ -347,7 +366,7 @@ class DesktopSession:
         now=time.monotonic() if now is None else now
         report=event.get('receiverReport')
         if not isinstance(report,dict):return
-        fields=['fps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
+        fields=['fps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoKeyFramesDelta','videoPliDelta','videoNackDelta','videoFreezeDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
         values={key:value for key in fields if isinstance(value:=report.get(key),(int,float)) and not isinstance(value,bool) and math.isfinite(value)}
         if getattr(self,'track',None):self.track.delivery.receiver_feedback(values,now=now)
         if now-self.last_report_log<5:return
@@ -367,6 +386,8 @@ class DesktopSession:
         return now-self.created_at>35
     async def answer(self,offer):
         self.owner.audio_router.start()
+        offered=sdp.SessionDescription.parse(offer['sdp'])
+        print(json.dumps({'sessionId':self.session_id,'offerVersion':str(offer.get('viewerVersion','legacy'))[:32],'separateControlRequested':bool(offer.get('separateControl')),'offeredMedia':[{'kind':media.kind,'mid':media.rtp.muxId,'port':media.port,'candidateTypes':sorted({candidate.type for candidate in media.ice_candidates})} for media in offered.media]}),flush=True)
         preferences=offer.get('preferences',{})
         fps=max(15,min(120,self.refresh,int(preferences.get('fps',60))))
         width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(preferences.get('quality')),self.source_width))

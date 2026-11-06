@@ -25,5 +25,16 @@ async def main():
     except ConnectionError:pass
     else:raise AssertionError('Closed transport must interrupt a waiting video')
     assert state['waits']>0 and state['maxQueuedBytes']==16000
+    # The desktop can use a UDP host/srflx socket while only the phone's
+    # incoming leg uses TURN/TCP. Its queue is invisible to our socket.
+    pair=SimpleNamespace(protocol=SimpleNamespace(transport=object()),local_candidate=SimpleNamespace(type='host'),remote_candidate=SimpleNamespace(type='relay'))
+    connection=SimpleNamespace(_nominated={1:pair},_closed=False)
+    dtls=SimpleNamespace(transport=SimpleNamespace(_connection=connection),state='connected',_send_rtp=send)
+    sender=SimpleNamespace(_RTCRtpSender__rtp_task=asyncio.current_task(),_RTCRtpSender__encoder=SimpleNamespace(requested_bitrate=350000))
+    remote=install_turn_flow_control(dtls,[102],video_sender=sender);started=asyncio.get_running_loop().time()
+    for _ in range(16):await dtls._send_rtp(bytes([128,102])+bytes(1198))
+    elapsed=asyncio.get_running_loop().time()-started
+    assert elapsed>.3 and remote['relayed'] and not remote['configuredWriters'],'Remote-only relay traffic bypassed pacing'
+    assert remote['pacingBitsPerSecond']==385000,'Low receiver bandwidth must not be replaced by a 1.5Mbps floor'
     print('Verified bounded video queue, audio progress, merged video payload types and prompt close. No network traffic.')
 asyncio.run(main())
