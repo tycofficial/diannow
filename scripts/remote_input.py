@@ -141,6 +141,11 @@ class RemoteInput:
             self.pressed.difference_update(down)
     def apply(self,event):
         with self.state_lock:self._apply(event)
+    def cursor(self):
+        point=POINT()
+        if not user32.GetCursorPos(ctypes.byref(point)) or not self.bounds:return None
+        left,top,width,height=self.bounds
+        return {'x':max(0,min(1,(point.x-left)/max(1,width-1))),'y':max(0,min(1,(point.y-top)/max(1,height-1))),'visible':left<=point.x<left+width and top<=point.y<top+height}
     def _apply(self,event):
         kind=event.get('type')
         owner=event.get('_owner','legacy')

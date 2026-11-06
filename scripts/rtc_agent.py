@@ -397,7 +397,7 @@ class DesktopSession:
                     self.last_activity=time.monotonic()
                     if event.get('type')=='ping':
                         self.report_receiver(event)
-                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
+                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
                     elif event.get('type')=='settings':
                         target_width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(event.get('quality')),self.source_width))//2*2
                         track.width=target_width;track.height=max(2,round(self.source_height*target_width/self.source_width)//2*2)
@@ -500,11 +500,17 @@ class DesktopAgent:
             if session.expired() and not session.closed:
                 try:await asyncio.wait_for(session.close(),2)
                 except asyncio.TimeoutError:pass
+        viewer=offer.get('viewerId')
+        if isinstance(viewer,str) and len(viewer)<=80:
+            for previous in list(self.sessions):
+                if previous.session_id!=session_id and getattr(previous,'viewer_id',None)==viewer and not previous.closed:
+                    try:await asyncio.wait_for(previous.close(),2)
+                    except asyncio.TimeoutError:pass
         if session_id:
             for session in self.sessions:
                 if session.session_id==session_id and session.answer_result is not None:return session.answer_result
         if sum(not session.closed for session in self.sessions)>=4:raise RuntimeError('Too many active desktop viewers. Close an unused viewer and retry.')
-        session=DesktopSession(self,session_id);self.sessions.append(session)
+        session=DesktopSession(self,session_id);session.viewer_id=viewer;self.sessions.append(session)
         try:
             session.answer_result=await session.answer(offer)
             return session.answer_result

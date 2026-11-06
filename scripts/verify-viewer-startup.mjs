@@ -11,7 +11,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
     const listeners={};
-    nodes[id]={children:[],textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
+    nodes[id]={style:{},children:[],textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
       classList:{toggle(){open=!open;return open}},setAttribute(){},appendChild(child){this.children.push(child)},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
   }
   class Peer{
