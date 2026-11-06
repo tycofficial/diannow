@@ -1,5 +1,6 @@
 """Standalone per-user desktop host; reuse the existing DPAPI configuration."""
 import ctypes
+import getpass
 from ctypes import wintypes
 import io
 import json
@@ -13,6 +14,8 @@ import time
 APP_DIR=Path(os.environ['LOCALAPPDATA'])/'CodexDesktopViewer'
 STATE_DIR=APP_DIR/'desktop-service'
 CONFIG_PATH=STATE_DIR/'connection.dpapi'
+PROTECTED_DIR=Path(os.environ.get('ProgramFiles','C:/Program Files'))/'DiannaoRemoteDesktop'
+PROTECTED_CONFIG=Path(os.environ.get('PROGRAMDATA','C:/ProgramData'))/'DiannaoRemoteDesktop'/getpass.getuser()/'connection.dpapi'
 MUTEX_NAME='Local\\CodexDesktopSupervisor_tianw_1105'
 CREATE_NO_WINDOW=0x08000000
 
@@ -20,7 +23,9 @@ class Blob(ctypes.Structure):
     _fields_=[('size',wintypes.DWORD),('data',ctypes.POINTER(ctypes.c_ubyte))]
 
 def load_configuration():
-    data=CONFIG_PATH.read_bytes();buffer=ctypes.create_string_buffer(data)
+    installed=Path(sys.executable).parent==PROTECTED_DIR
+    path=PROTECTED_CONFIG if installed or PROTECTED_CONFIG.exists() else CONFIG_PATH
+    data=path.read_bytes();buffer=ctypes.create_string_buffer(data)
     source=Blob(len(data),ctypes.cast(buffer,ctypes.POINTER(ctypes.c_ubyte)));target=Blob()
     crypt32=ctypes.WinDLL('crypt32',use_last_error=True)
     if not crypt32.CryptUnprotectData(ctypes.byref(source),None,None,None,None,1,ctypes.byref(target)):
@@ -77,6 +82,9 @@ def own_command(*arguments):
     return [sys.executable,str(Path(__file__).resolve()),*arguments]
 
 def start_background():
+    if (PROTECTED_DIR/'RemoteDesktop.exe').exists():
+        subprocess.run(['schtasks.exe','/Run','/TN','CodexDesktopViewer'],creationflags=CREATE_NO_WINDOW,check=False)
+        return
     installed=APP_DIR/'RemoteDesktop.exe'
     command=[str(installed),'--background'] if installed.exists() else own_command('--background')
     # A standalone one-file child must retain its own extracted runtime after the GUI closes.
@@ -98,13 +106,15 @@ def supervise():
         while True:
             now=time.monotonic()
             if (STATE_DIR/'stop.request').exists():break
-            requested=(STATE_DIR/'restart.request').exists()
+            heartbeat=read_json(STATE_DIR/'engine-status.json')
+            stalled=bool(process and heartbeat.get('pid')==process.pid and time.time()-heartbeat.get('updated',time.time())>55)
+            requested=(STATE_DIR/'restart.request').exists() or stalled
             if resumed(last_tick,now) or requested:
                 (STATE_DIR/'restart.request').unlink(missing_ok=True)
                 if process and process.poll() is None:
                     api.TerminateJobObject(job,0);process.wait(timeout=15)
                 process=None;restart_at=now
-                log('resume-or-restart')
+                log('resume-or-restart',stalled=stalled)
             last_tick=now
             if process and process.poll() is not None:
                 log('engine-exited',code=process.returncode);process=None;restart_at=now+3
@@ -135,8 +145,11 @@ class AgentOutput:
                 line,self.pending=self.pending.split('\n',1)
                 try:message=json.loads(line)
                 except ValueError:continue
-                if message.get('serviceAuthenticated'):
-                    atomic_json(STATE_DIR/'engine-status.json',{'authenticated':True,'pid':os.getpid(),'updated':time.time()})
+                if message.get('serviceAuthenticated') or message.get('engineHeartbeat'):
+                    state=read_json(STATE_DIR/'engine-status.json')
+                    if message.get('serviceAuthenticated'):state['authenticated']=True
+                    state.update(pid=os.getpid(),updated=time.time())
+                    atomic_json(STATE_DIR/'engine-status.json',state)
         return len(value)
     def flush(self):self.stream.flush()
     def fileno(self):return self.stream.fileno()
@@ -144,10 +157,14 @@ class AgentOutput:
 
 def run_engine():
     output=AgentOutput();sys.stdout=sys.stderr=output
-    # Favor the interactive stream without using high/realtime priorities.
+    # High is bounded below Realtime; only the media worker is promoted.
     api=kernel();api.GetCurrentProcess.restype=wintypes.HANDLE
     api.SetPriorityClass.argtypes=[wintypes.HANDLE,wintypes.DWORD]
-    api.SetPriorityClass(api.GetCurrentProcess(),0x8000)
+    api.SetPriorityClass(api.GetCurrentProcess(),0x80)
+    class Throttling(ctypes.Structure):_fields_=[('Version',wintypes.DWORD),('ControlMask',wintypes.DWORD),('StateMask',wintypes.DWORD)]
+    policy=Throttling(1,1,0)
+    api.SetProcessInformation.argtypes=[wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD]
+    api.SetProcessInformation(api.GetCurrentProcess(),4,ctypes.byref(policy),ctypes.sizeof(policy))
     atomic_json(STATE_DIR/'engine-status.json',{'authenticated':False,'pid':os.getpid(),'updated':time.time()})
     config=load_configuration();sys.stdin=io.StringIO(json.dumps(config)+'\n')
     import asyncio

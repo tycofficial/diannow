@@ -1,6 +1,7 @@
 """Input used only by the authenticated remote viewer's WebRTC data channel."""
 import ctypes, threading, queue, time
 from ctypes import wintypes
+from touch_injection import NativeTouch
 
 user32=ctypes.WinDLL('user32',use_last_error=True)
 ULONG_PTR=wintypes.WPARAM
@@ -26,6 +27,11 @@ KEYS={'Backspace':8,'Tab':9,'Enter':13,'Shift':16,'Control':17,'Alt':18,'Pause':
 KEYS.update({'F'+str(i):111+i for i in range(1,13)})
 KEYS.update({chr(i):i for i in range(65,91)})
 KEYS.update({str(i):48+i for i in range(10)})
+PHYSICAL={'ShiftLeft':160,'ShiftRight':161,'ControlLeft':162,'ControlRight':163,'AltLeft':164,'AltRight':165,'MetaLeft':91,'MetaRight':92,'Minus':189,'Equal':187,'BracketLeft':219,'BracketRight':221,'Backslash':220,'Semicolon':186,'Quote':222,'Comma':188,'Period':190,'Slash':191,'Backquote':192,'NumpadAdd':107,'NumpadSubtract':109,'NumpadMultiply':106,'NumpadDivide':111,'NumpadDecimal':110,'NumpadEnter':13}
+PHYSICAL.update({'Key'+chr(i):i for i in range(65,91)})
+PHYSICAL.update({'Digit'+str(i):48+i for i in range(10)})
+PHYSICAL.update({'Numpad'+str(i):96+i for i in range(10)})
+PHYSICAL['NumLock']=144
 
 def process_integrity(pid):
     """Read a process's integrity without changing its token or permissions."""
@@ -77,6 +83,8 @@ def mouse(flags,data=0,x=0,y=0): return INPUT(type=0,mi=MOUSEINPUT(dx=x,dy=y,mou
 
 class RemoteInput:
     def __init__(self):
+        self.touch=NativeTouch()
+        self.owners={};self.touch_owner=None;self.state_lock=threading.RLock()
         self.events=queue.Queue(maxsize=512);self.buttons=set();self.pressed=set();self.running=True;self.error=None;self.enabled=False;self.on_result=None;self.move_sequence=0
         self.thread=threading.Thread(target=self.run,name='RemoteInput',daemon=True);self.thread.start()
     def submit(self,event,on_result=None):
@@ -84,11 +92,24 @@ class RemoteInput:
         try:self.events.put_nowait((event,on_result or self.on_result))
         except queue.Full:self.release_all()
     def release_all(self):
+        with self.state_lock:self._release_all()
+    def _release_all(self):
+        self.touch.release(True)
+        self.touch_owner=None;self.owners.clear()
         flags={0:4,1:64,2:16}
         for button in list(self.buttons):emit([mouse(flags.get(button,4))])
         self.buttons.clear()
         if self.pressed:emit([key(vk,True) for vk in list(self.pressed)])
         self.pressed.clear()
+    def release_owner(self,owner):
+        with self.state_lock:
+            state=self.owners.pop(owner,None)
+            if self.touch_owner==owner:self.touch.release(True);self.touch_owner=None
+            if not state:return
+            for vk in state['keys']:
+                if not any(vk in value['keys'] for value in self.owners.values()):emit([key(vk,True)]);self.pressed.discard(vk)
+            for button in state['buttons']:
+                if not any(button in value['buttons'] for value in self.owners.values()):emit([mouse({0:4,1:64,2:16}[button])]);self.buttons.discard(button)
     def disable(self):
         self.enabled=False;self.move_sequence=0;self.error=None
         while True:
@@ -103,21 +124,44 @@ class RemoteInput:
                 self.apply(event)
                 # Pointer movement and an empty release do not prove that the
                 # user's failed click or key reached its target program.
-                if event.get('type') in ['button','wheel','key','text']:self.error=None
+                if event.get('type') in ['button','wheel','key','text','touch','keyState']:self.error=None
                 if on_result and event.get('id'):on_result(event['id'],None)
             except Exception as error:
                 self.error=str(error)
                 if on_result and event.get('id'):on_result(event['id'],self.error)
     def tap(self,vk,modifiers=()):
         down=list(dict.fromkeys([*modifiers,vk]))
+        existing=set(self.pressed)
+        down=[value for value in down if value not in existing]
         emit([key(value) for value in down]);self.pressed.update(down)
         try:time.sleep(.04)
         finally:
             emit([key(value,True) for value in reversed(down)])
             self.pressed.difference_update(down)
     def apply(self,event):
+        with self.state_lock:self._apply(event)
+    def _apply(self,event):
         kind=event.get('type')
-        if kind=='move':
+        owner=event.get('_owner','legacy')
+        state=self.owners.setdefault(owner,{'keys':set(),'buttons':set()})
+        if kind=='touch':
+            if event.get('phase')=='down':self.touch_owner=owner
+            if self.touch_owner==owner:
+                self.touch.apply(event)
+                if event.get('phase') in ['up','cancel']:self.touch_owner=None
+        elif kind=='relative':
+            previous=state.get('fraction',(0,0));x=max(-2000,min(2000,float(event.get('dx',0))))+previous[0];y=max(-2000,min(2000,float(event.get('dy',0))))+previous[1]
+            dx=round(x);dy=round(y);state['fraction']=(x-dx,y-dy)
+            if dx or dy:emit([mouse(1,x=dx,y=dy)])
+        elif kind=='keyState':
+            code=str(event.get('code',''));vk=PHYSICAL.get(code,KEYS.get(code))
+            if vk is None:return
+            if event.get('down'):
+                emit([key(vk)]);state['keys'].add(vk);self.pressed.add(vk)
+            else:
+                state['keys'].discard(vk)
+                if not any(vk in value['keys'] for value in self.owners.values()):emit([key(vk,True)]);self.pressed.discard(vk)
+        elif kind=='move':
             sequence=event.get('seq',0)
             if sequence and sequence<self.move_sequence:return
             if sequence:self.move_sequence=sequence
@@ -127,9 +171,12 @@ class RemoteInput:
             if 'x' in event and 'y' in event:self.apply({'type':'move','x':event['x'],'y':event['y']})
             button=int(event.get('button',0));down=bool(event.get('down'))
             if button not in [0,1,2]:return
-            emit([mouse({0:(2,4),1:(32,64),2:(8,16)}[button][0 if down else 1])])
-            if down:self.buttons.add(button)
-            else:self.buttons.discard(button)
+            if down:
+                if button not in self.buttons:emit([mouse({0:2,1:32,2:8}[button])])
+                state['buttons'].add(button);self.buttons.add(button)
+            else:
+                state['buttons'].discard(button)
+                if not any(button in value['buttons'] for value in self.owners.values()):emit([mouse({0:4,1:64,2:16}[button])]);self.buttons.discard(button)
         elif kind=='wheel':
             if 'x' in event and 'y' in event:
                 self.apply({'type':'move','x':event['x'],'y':event['y']})
@@ -160,4 +207,4 @@ class RemoteInput:
             if vk is None:return
             modifiers=[KEYS[m] for m in event.get('modifiers',[]) if m in ['Control','Alt','Shift','Meta']]
             self.tap(vk,modifiers)
-        elif kind=='release':self.release_all()
+        elif kind=='release':self.release_owner(owner)

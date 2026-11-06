@@ -2,7 +2,7 @@ import { mkdir, copyFile, readFile, writeFile } from 'node:fs/promises';
 await mkdir('dist/server', { recursive: true });
 await mkdir('dist/.openai', { recursive: true });
 const source = await readFile('worker/index.js', 'utf8');
-const gestures=(await readFile('web/gestures.mjs','utf8')).replace('export class','class');
+const gestures=(await readFile('web/gestures.mjs','utf8')).replaceAll('export class','class');
 const page = (await readFile('web/viewer.html', 'utf8')).replace('//__GESTURES__',gestures);
 for(const match of page.matchAll(/<script>([\s\S]*?)<\/script>/g))new (await import('node:vm')).Script(match[1]);
 await writeFile('dist/server/index.js', source.replace('"__VIEWER_HTML__"', JSON.stringify(page)));

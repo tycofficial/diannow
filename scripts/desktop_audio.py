@@ -8,9 +8,13 @@ from aiortc.codecs.opus import OpusEncoder
 class TimelineOpusEncoder(OpusEncoder):
     """Keep a capture gap from generating an extra stale RTP timestamp."""
     def __init__(self):
-        super().__init__();self.expected_time=None
+        super().__init__();self.configure();self.expected_time=None;self.rtp_origin=None;self.lookahead=None
+    def configure(self):
+        self.codec.options={'application':'lowdelay','frame_duration':'5'}
+        self.resampler=av.AudioResampler(format='s16',layout='stereo',rate=48000,frame_size=240)
     def encode(self,frame,force_keyframe=False):
         frame_time=frame.pts*frame.time_base if frame.pts is not None and frame.time_base is not None else None
+        if self.rtp_origin is None and frame_time is not None:self.rtp_origin=round(frame_time*48000)
         if frame_time is not None and self.expected_time is not None and abs(frame_time-self.expected_time)>fractions.Fraction(1,frame.sample_rate):
             # libopus retains its lookahead across an input-PTS jump. Without
             # a reset it stamps the first fresh packet with the old expected
@@ -18,15 +22,33 @@ class TimelineOpusEncoder(OpusEncoder):
             # spikes. Preserve the RTP origin while dropping stale lookahead.
             origin=self.first_packet_pts
             OpusEncoder.__init__(self)
+            self.configure()
+            self.lookahead=None
             self.first_packet_pts=origin
         self.expected_time=frame_time+fractions.Fraction(frame.samples,frame.sample_rate) if frame_time is not None else None
-        return super().encode(frame,force_keyframe)
+        packets=[]
+        for converted in self.resampler.resample(frame):
+            encoded=self.codec.encode(converted)
+            if encoded and self.lookahead is None:self.lookahead=converted.pts-encoded[0].pts
+            packets.extend(encoded)
+        if not packets:return [],None
+        stamp=packets[0].pts+(self.lookahead or 0)-(self.rtp_origin or 0)
+        return [bytes(packet) for packet in packets],stamp
 
 class DesktopAudioTrack(MediaStreamTrack):
     kind='audio'
     def __init__(self):
-        super().__init__();self.audio=pyaudio.PyAudio();self.device=self.audio.get_default_wasapi_loopback()
-        self.rate=int(self.device['defaultSampleRate']);self.channels=min(2,int(self.device['maxInputChannels']));self.samples=self.rate//50
+        super().__init__();self.audio=pyaudio.PyAudio()
+        devices=list(self.audio.get_device_info_generator())
+        virtual=[d for d in devices if d['maxInputChannels']>0 and not d.get('isLoopbackDevice') and 'hi-fi cable output' in d['name'].lower()]
+        wasapi=self.audio.get_host_api_info_by_type(pyaudio.paWASAPI)['index']
+        virtual.sort(key=lambda d:d['hostApi']!=wasapi)
+        self.independent=bool(virtual)
+        self.device=virtual[0] if virtual else self.audio.get_default_wasapi_loopback()
+        self.rate=int(self.device['defaultSampleRate']);self.channels=min(2,int(self.device['maxInputChannels']));self.samples=self.rate//200
+        try:
+            if self.audio.is_format_supported(48000,input_device=int(self.device['index']),input_channels=self.channels,input_format=pyaudio.paInt16):self.rate=48000;self.samples=240
+        except ValueError:pass
         self.frames=queue.Queue(maxsize=2);self.timestamp=0;self.closed=False;self.started=None
         def callback(data,frame_count,time_info,status):
             if self.closed:return (None,pyaudio.paComplete)
@@ -64,8 +86,9 @@ class DesktopAudioTrack(MediaStreamTrack):
         self.audio.terminate()
 
 def virtual_microphone_device(audio):
-    devices=[device for device in audio.get_device_info_generator() if device['maxOutputChannels']>0 and not device.get('isLoopbackDevice') and any(name in device['name'].lower() for name in ['cable input','voicemeeter input','virtual cable','virtual audio cable'])]
-    devices.sort(key=lambda device:device['hostApi']!=2)
+    devices=[device for device in audio.get_device_info_generator() if device['maxOutputChannels']>0 and not device.get('isLoopbackDevice') and 'hi-fi' not in device['name'].lower() and any(name in device['name'].lower() for name in ['cable input','voicemeeter input','virtual cable','virtual audio cable'])]
+    wasapi=audio.get_host_api_info_by_type(pyaudio.paWASAPI)['index']
+    devices.sort(key=lambda device:device['hostApi']!=wasapi)
     return devices[0] if devices else None
 
 class MicrophoneSink:
@@ -73,7 +96,7 @@ class MicrophoneSink:
         self.audio=pyaudio.PyAudio();self.device=virtual_microphone_device(self.audio);self.stream=None;self.closed=False
         if self.device:
             self.rate=int(self.device['defaultSampleRate']);self.channels=min(2,int(self.device['maxOutputChannels']))
-            self.stream=self.audio.open(format=pyaudio.paInt16,channels=self.channels,rate=self.rate,output=True,output_device_index=int(self.device['index']),frames_per_buffer=self.rate//50)
+            self.stream=self.audio.open(format=pyaudio.paInt16,channels=self.channels,rate=self.rate,output=True,output_device_index=int(self.device['index']),frames_per_buffer=self.rate//200)
             self.resampler=av.AudioResampler(format='s16',layout='stereo' if self.channels==2 else 'mono',rate=self.rate)
     async def consume(self,track):
         try:

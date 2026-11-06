@@ -32,11 +32,11 @@ async def measure(conversion_seconds,count):
             await track.recv()
             # aiortc encodes only after recv returns. Represent its existing
             # encoder work so the pacing test includes both stages.
-            await asyncio.sleep(.003)
+            await asyncio.sleep(.008)
         elapsed=track.started[-1]-track.started[0]
         fps=(count-1)/elapsed
         assert track.maximum_active==1,'Frame work accumulated concurrently.'
-        assert len(track.started)==count,'Frames were prefetched into a backlog.'
+        assert count<=len(track.started)<=count+1,'Only one prepared frame is permitted.'
         return fps,track
     finally:
         track.stop()

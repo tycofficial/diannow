@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 
-const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(await readFile('web/gestures.mjs','utf8')).replace('export class','class'));
+const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(await readFile('web/gestures.mjs','utf8')).replaceAll('export class','class'));
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
@@ -26,14 +26,14 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
     async getStats(){return this.stats||new Map()}
     close(){this.connectionState='closed';this.onconnectionstatechange?.()}
   }
-  const window={addEventListener(){},isSecureContext:true,AudioContext:AudioContextClass};window.self=window;window.top=window;
+  const windowListeners={};const window={addEventListener(type,listener){(windowListeners[type]??=[]).push(listener)},isSecureContext:true,AudioContext:AudioContextClass};window.self=window;window.top=window;
   // WebKit rejects Window timer functions invoked as methods of TouchGestures.
   // Bare global calls and calls on Window remain valid.
   function wrongReceiver(value){return value&&Object.prototype.toString.call(value.pointers)==='[object Map]'}
   function setTimer(callback,delay){if(wrongReceiver(this))throw new TypeError('Can only call Window.setTimeout on instances of Window');timers.set(++timerId,{callback,delay});return timerId}
   function clearTimer(id){if(wrongReceiver(this))throw new TypeError('Can only call Window.clearTimeout on instances of Window');timers.delete(id)}
   const navigator={audioSession:{type:'auto'}};
-  const context=vm.createContext({window,navigator,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({}),addEventListener(){}},
+  const context=vm.createContext({window,navigator,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({appendChild(){},classList:{add(){},remove(){}}}),addEventListener(){}},
     location:{hostname:'screen.example'},setTimeout:setTimer,clearTimeout:clearTimer,setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
@@ -45,12 +45,13 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   nodes.keyboard.onclick();
   assert.equal(nodes.keyboard.textContent,'收起键盘');
   if(stages.includes('connected')){
+    channels[0].onmessage({data:JSON.stringify({type:'pong',inputFeatures:['nativeTouch','keyState','relativePointer']})});
     const event={pointerId:1,pointerType:'touch',clientX:50,clientY:50,preventDefault(){}};
     nodes.screen.onpointerdown(event);nodes.screen.onpointerup(event);
   }
   async function fireTimer(delay){const entry=[...timers].find(([,timer])=>timer.delay===delay);assert(entry,'Expected a '+delay+' ms timer');timers.delete(entry[0]);entry[1].callback();await flush()}
   function dispatch(id,type,properties={}){const event={prevented:false,preventDefault(){this.prevented=true},...properties};for(const listener of nodes[id].listeners[type]||[])listener(event);return event}
-  return {nodes,stages,requests,peers,timers,fireTimer,channels,sent,dispatch,intervals,navigator,advanceTime:ms=>clockNow+=ms};
+  return {nodes,stages,requests,peers,timers,fireTimer,channels,sent,dispatch,intervals,navigator,dispatchWindow(type,event){for(const listener of windowListeners[type]||[])listener(event)},advanceTime:ms=>clockNow+=ms};
 }
 const connected=await start(true);
 assert(connected.stages.includes('connected'));
@@ -59,9 +60,7 @@ assert.equal(connected.requests[0].options.credentials,'omit');
 const unavailable=await start(false);
 assert(unavailable.stages.includes('connection-error'));
 assert.match(unavailable.nodes.overlay.textContent,/没有提供/);
-const broken=await start(true,scripts.map(source=>source.replace('setTimer=(callback,delay)=>setTimeout(callback,delay),clearTimer=timer=>clearTimeout(timer)','setTimer=setTimeout,clearTimer=clearTimeout')));
-assert(!broken.stages.includes('connected'));
-assert.match(broken.nodes.overlay.textContent,/Can only call Window.clearTimeout/);
+assert(connected.sent.some(e=>e.type==='touch'&&e.phase==='down'),'Touch responds immediately without a hold timer');
 const response=(status,value)=>({ok:status>=200&&status<300,status,json:async()=>value});
 async function pendingAnswer(){
   let finish,offers=0;
@@ -186,7 +185,7 @@ for(const status of [503,200]){
     ['audio',{id:'audio',type:'inbound-rtp',kind:'audio',timestamp:second*1000,jitterBufferDelay:second*72000,jitterBufferEmittedCount:second*48000,totalSamplesDuration:second,totalAudioEnergy:second*.04,totalSamplesReceived:second*48000,concealedSamples:second===1?100:120}],
     ['playout',{id:'playout',type:'media-playout',kind:'audio',totalPlayoutDelay:second*9600,totalSamplesCount:second*48000,totalSamplesDuration:second}]
   ]);
-  peer.stats=richStats(1);await viewer.intervals[0]();viewer.advanceTime(1000);playback={totalVideoFrames:120,droppedVideoFrames:7};peer.stats=richStats(2);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/画面缓冲 29 ms · 声音缓冲 1500 ms/);viewer.advanceTime(1000);await viewer.intervals[0]();
+  peer.stats=richStats(1);await viewer.intervals[0]();viewer.advanceTime(1000);playback={totalVideoFrames:120,droppedVideoFrames:7};peer.stats=richStats(2);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/画面缓冲 29 ms · 声音关闭/);viewer.advanceTime(1000);await viewer.intervals[0]();
   const report=viewer.sent.findLast(event=>event.receiverReport).receiverReport;
   assert.equal(report.bufferMs,29);assert.equal(report.audioBufferMs,1500,'Audio delay must be measured independently of the low video buffer');
   assert.equal(report.audioRms,.2,'Audio RMS must use actual received energy and duration deltas');
@@ -276,3 +275,9 @@ for(const action of ['mute','reconnect']){
   assert.equal(mock.contexts[0].sources.length,0,'A late resume after '+action+' must not attach the old audio stream');assert.equal(viewer.nodes.desktopAudio.muted,true);assert.equal(viewer.nodes.desktopAudio.playCalls,0);
 }
 console.log('Verified reconnect/input regressions, precise receiver diagnostics, interactive Web Audio, compatible fallback, unlock retries, mute races and media cleanup. No network or media was used.');
+
+const rawStart=connected.sent.length;
+for(const [type,down] of [['keydown',true],['keyup',false]])connected.dispatchWindow(type,{key:'a',code:'KeyA',preventDefault(){},target:{tagName:'BODY'}});
+assert.deepEqual(connected.sent.slice(rawStart).map(e=>[e.type,e.code,e.down]),[['keyState','KeyA',true],['keyState','KeyA',false]]);
+const ignored=connected.sent.length;connected.dispatchWindow('keydown',{key:'a',code:'KeyA',preventDefault(){},target:{tagName:'TEXTAREA'}});assert.equal(connected.sent.length,ignored);
+console.log('Hardware keyboard routes without opening the on-screen keyboard and preserves local text editing.');

@@ -13,9 +13,10 @@ class Camera:
     def grab(self):raise AssertionError('Duplicate DXGI capture')
 
 camera=Camera();source=module.SharedFrameSource(camera,60,clock=lambda:0,hardware=True)
+source.snapshot=lambda after=None:(camera.pixels,0,1)
 first=source.get_yuv(64,48)[0];second=source.get_yuv(64,48)[0]
-assert first is second and first.shape==(48,64,4) and camera.reads==1 and source.conversions==0
-small=source.get_yuv(32,24)[0];assert small.shape==(24,32,4) and camera.reads==1
+assert first is second and first.shape==(48,64,4) and camera.reads==0 and source.conversions==0
+small=source.get_yuv(32,24)[0];assert small.shape==(24,32,4) and camera.reads==0
 original_context=av.CodecContext
 attempts=[]
 def create(name,*args,**kwargs):

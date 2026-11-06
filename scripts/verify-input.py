@@ -61,3 +61,21 @@ module.process_integrity=lambda pid:8192
 assert 'higher Windows privileges' not in module.input_failure(0,1,5)
 module.process_integrity=original_process_integrity
 print('Input checks passed: coordinates, release, Unicode with multiline batches, modifiers, Esc hold, extended scan codes, persistent failure diagnostics and disconnected acknowledgements. No desktop input was injected.')
+
+# A phone releasing its controls must not release an iPad's held key.
+other=module.RemoteInput();captured.clear()
+other.apply({'type':'keyState','code':'ShiftLeft','down':True,'_owner':'ipad'})
+other.apply({'type':'button','button':0,'down':True,'_owner':'phone'})
+other.apply({'type':'release','_owner':'phone'})
+assert 160 in other.pressed and not other.buttons
+other.apply({'type':'keyState','code':'KeyA','down':True,'_owner':'ipad'})
+other.release_owner('phone');assert other.pressed=={160,65}
+other.release_owner('ipad');assert not other.pressed
+other.apply({'type':'keyState','code':'ControlLeft','down':True,'_owner':'ipad'})
+other.apply({'type':'keyState','code':'ControlLeft','down':True,'_owner':'phone'})
+other.release_owner('phone');assert 162 in other.pressed
+other.release_owner('ipad');assert not other.pressed
+captured.clear()
+for _ in range(10):other.apply({'type':'relative','dx':.2,'dy':.1,'_owner':'phone'})
+assert sum(e.mi.dx for e in captured)==2 and sum(e.mi.dy for e in captured)==1
+print('Cooperating viewers retain independent held keys/buttons, and trackpad motion preserves subpixel deltas.')

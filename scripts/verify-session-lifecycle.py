@@ -34,14 +34,14 @@ async def main():
     session.created_at=now-600;session.last_activity=now
     assert not session.expired(now),'An active viewer must survive regardless of age.'
     session.last_activity=now-31
-    assert session.expired(now),'A viewer without heartbeat must release its slot.'
+    assert not session.expired(now),'A healthy transport survives delayed heartbeat timers.'
     session.last_activity=now
     session.pc.connectionState='disconnected'
     assert not session.expired(now),'Short disconnections must have time to recover.'
-    assert session.expired(now+31)
+    assert session.expired(now+91)
     session.pc.connectionState='connecting';session.created_at=now-36
     assert session.expired(now),'An abandoned connection attempt must release its slot.'
-    session.pc.connectionState='connected';session.last_activity=now-31
+    session.pc.connectionState='disconnected';session.last_activity=now-91
     await agent.answer(offer,session_id='new-0')
     assert session.closed and len(agent.sessions)==1
     for index in range(1,4):await agent.answer(offer,session_id='new-'+str(index))

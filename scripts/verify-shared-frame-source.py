@@ -16,6 +16,15 @@ class CameraDouble:
 
 
 camera=CameraDouble();clock=[0.0];source=SharedFrameSource(camera,60,clock=lambda:clock[0])
+snapshot_lock=threading.Lock()
+def snapshot(after=None):
+    with snapshot_lock:return read_snapshot()
+def read_snapshot():
+    tick=int(clock[0]*60)
+    if tick!=getattr(camera,'tick',None):
+        camera.tick=tick;camera.snapshot=camera.get_latest_frame();source.grabs+=1
+    return camera.snapshot,clock[0],tick
+source.snapshot=snapshot
 tracks=[DesktopTrack(camera,64,48,60,'viewer-'+str(index),frame_source=source) for index in range(3)]
 try:
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:frames=list(pool.map(lambda track:track.read_frame(),tracks))
