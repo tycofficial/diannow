@@ -23,6 +23,7 @@ from rtp_scheduling import install_cooperative_rtp_send
 from ice_consent import install_consent_window
 from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
+from control_transport import isolate_control
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
@@ -33,6 +34,17 @@ def signaling_proxy():
     try:
         with socket.create_connection(('127.0.0.1',7890),timeout=.2):return 'http://127.0.0.1:7890'
     except OSError:return None
+
+def desktop_ice_servers(config):
+    servers=[]
+    for server in config.get('iceServers',[]):
+        urls=server.get('urls',[]);urls=[urls] if isinstance(urls,str) else urls
+        # Keep STUN so the desktop can advertise a public UDP mapping and
+        # attempt direct Internet ICE. Filtering only TURN/TCP forced many
+        # otherwise viable networks onto the distant relay.
+        supported=[value for value in urls if isinstance(value,str) and (value.startswith('stun:') or value.startswith('turns:') or value.startswith('turn:') and 'transport=tcp' in value)]
+        if supported:servers.append(RTCIceServer(urls=supported,username=server.get('username'),credential=server.get('credential')))
+    return servers
 
 class WindowsTimerResolution:
     def __init__(self,milliseconds=1,winmm=None):self.milliseconds=milliseconds;self.winmm=winmm;self.active=False
@@ -457,13 +469,17 @@ class DesktopSession:
                     print(json.dumps({'sessionId':self.session_id,'expired':True,'connection':pc.connectionState}),flush=True)
                     await self.close()
         self.watchdog=asyncio.create_task(expire_idle())
-        await pc.setRemoteDescription(RTCSessionDescription(sdp=offer['sdp'],type=offer['type']))
+        remote_description,self.separate_control=isolate_control(RTCSessionDescription(sdp=offer['sdp'],type=offer['type']),bool(offer.get('separateControl')))
+        await pc.setRemoteDescription(remote_description)
         for transceiver in pc.getTransceivers():install_cooperative_rtp_send(transceiver.sender.transport)
         for transceiver in pc.getTransceivers():
             if transceiver.kind=='video':self.turn_flow=install_turn_flow_control(transceiver.sender.transport,[codec.payloadType for codec in transceiver._codecs],video_sender=transceiver.sender)
         playout=configure_video_playout_delay(pc,offer['sdp'],maximum_ms=150)
         print(json.dumps({'sessionId':self.session_id,'videoPlayoutDelay':playout}),flush=True)
-        await pc.setLocalDescription(independent_media_description(await pc.createAnswer(),cnames))
+        answer=independent_media_description(await pc.createAnswer(),cnames)
+        if self.separate_control:answer,_=isolate_control(answer)
+        await pc.setLocalDescription(answer)
+        print(json.dumps({'sessionId':self.session_id,'separateControlTransport':bool(pc.sctp and pc.sctp.transport is not self.video_sender.transport)}),flush=True)
         if getattr(self,'audio_sender',None):self.audio_sender._enabled=False
         self.consent_state=install_consent_window(pc)
         return {'sdp':pc.localDescription.sdp,'type':pc.localDescription.type}
@@ -586,11 +602,7 @@ async def run_agent():
                             ice_refresh=time.monotonic();phase='ice-config'
                             async with session.get(url+'/api/ice',proxy=proxy) as response:
                                 if response.status==200:
-                                    ice=await response.json();servers=[]
-                                    for server in ice.get('iceServers',[]):
-                                        urls=server.get('urls',[]);urls=[urls] if isinstance(urls,str) else urls
-                                        tcp=[value for value in urls if value.startswith('turn') and ('transport=tcp' in value or value.startswith('turns:'))]
-                                        if tcp:servers.append(RTCIceServer(urls=tcp,username=server.get('username'),credential=server.get('credential')))
+                                    ice=await response.json();servers=desktop_ice_servers(ice)
                                     if servers:agent.ice_servers=servers
                         phase='poll'
                         async with session.get(url+'/api/agent/poll',proxy=proxy) as response:

@@ -1,3 +1,26 @@
+export class MotionQueue {
+  constructor(send){this.send=send;this.reset()}
+  reset(){this.touchId=0;this.touchSeq=0;this.relativeX=0;this.relativeY=0;this.relativeSeq=0;this.pendingTouch=null;this.pendingRelative=null}
+  emit(event){
+    if(event.type==='touch'){
+      if(event.phase==='down'){this.touchId++;this.touchSeq=0}
+      event={...event,gesture:this.touchId,touchSeq:++this.touchSeq};
+      if(event.phase==='move'){this.pendingTouch=event;return}
+      this.pendingTouch=null;this.send(event);return;
+    }
+    if(event.type==='relative'){
+      this.relativeX+=event.dx;this.relativeY+=event.dy;
+      this.pendingRelative={type:'relative',totalX:this.relativeX,totalY:this.relativeY,dx:(this.pendingRelative?.dx||0)+event.dx,dy:(this.pendingRelative?.dy||0)+event.dy,seq:++this.relativeSeq};return;
+    }
+    if(event.type==='button'&&this.relativeSeq){this.flush();event={...event,relativeSnapshot:{totalX:this.relativeX,totalY:this.relativeY,seq:this.relativeSeq}}}
+    this.send(event);
+  }
+  flush(){
+    if(this.pendingTouch){this.send(this.pendingTouch,true);this.pendingTouch=null}
+    if(this.pendingRelative){this.send(this.pendingRelative,true);this.pendingRelative=null}
+  }
+}
+
 export class TouchGestures {
   constructor({emit,point,mode=()=> 'native',clock=()=>performance.now()}){this.emit=emit;this.point=point;this.mode=mode;this.clock=clock;this.pointers=new Map();this.gesture=null}
   down(event){

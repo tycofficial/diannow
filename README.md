@@ -5,7 +5,7 @@
 - https://tycofficial.github.io/diannow/
 - https://desktop-live-tianw-1105.tyc130923.chatgpt.site/
 
-两个平台使用相同的网页代码，GitHub Pages 通过 Site Worker 交换连接信令。网页自动取得 ICE 配置，优先直连，失败后自动重试 TURN 中继。电脑端使用已运行的本机 Clash 代理访问信令站点，并让 TURN/TCP 媒体连接通过同一代理，并从站点取得 TURN TCP 配置。中继线路的速度取决于网络和提供商。
+两个平台使用相同的网页代码，GitHub Pages 通过 Site Worker 交换连接信令。网页自动取得 ICE 配置，优先直连，失败后自动重试 TURN 中继。电脑端使用已运行的本机 Clash 代理访问信令站点，并让 TURN/TCP 媒体连接通过同一代理，并从站点取得 TURN TCP 配置。电脑端保留 STUN 公网 UDP 映射探测，允许不同网络直接协商；断线重试优先采用首条已配置的 TCP 中继线路。中继线路的速度取决于网络和提供商。
 
 ## 画面与操作
 
@@ -25,7 +25,7 @@
 
 桌面“远程桌面.exe”可手动启动、停止和重连；关闭其窗口或最小化 ChatGPT 不会停止后台。真实后端安装于受保护的 Program Files 目录，通过最高可用权限计划任务在登录、解锁、唤醒后启动，可操作同一交互桌面的管理员窗口。Windows UAC 安全桌面仍需本机确认。
 
-视频暂时停止解码时请求新的关键帧并重试现有播放器，操作通道仍存活时保留连接。初始连接超时不会误伤已连接的会话，真正网络断开后自动尝试中继。电脑端的 ICE 保活响应等待窗口为 2 秒，以容纳跨地区 TURN 往返；仍在最后一次有效保活回复超过 30 秒后关闭失联连接。TURN/TCP 视频按 8KB 应用排队上限和 256KB 系统发送缓冲施加反压，队列拥塞时暂停视频发包，把发送机会留给操作、声音和保活，并结合接收端带宽反馈和实际往返延迟为视频发包定速，避免将静态桌面的低流量误当成线路上限。关闭网页声音时停止发送桌面音频，避免持续占用流量；再次开启声音会恢复发送。网页明确区分画面连接与操作通道就绪，小指针根据画面缩放，宽度不超过 10 CSS 像素。
+视频暂时停止解码时请求新的关键帧并重试现有播放器，操作通道仍存活时保留连接。初始连接超时不会误伤已连接的会话，真正网络断开后自动尝试中继。电脑端的 ICE 保活响应等待窗口为 2 秒，以容纳跨地区 TURN 往返；仍在最后一次有效保活回复超过 30 秒后关闭失联连接。TURN/TCP 视频按 8KB 应用排队上限和 256KB 系统发送缓冲施加反压，队列拥塞时暂停视频发包，把发送机会留给操作、声音和保活，并结合接收端带宽反馈和实际往返延迟为视频发包定速，避免将静态桌面的低流量误当成线路上限。关闭网页声音时停止发送桌面音频，避免持续占用流量；再次开启声音会恢复发送。网页明确区分画面连接与操作通道就绪，小指针根据画面缩放，宽度不超过 10 CSS 像素。新版使用 balanced 协商，将操作数据与音视频拆为独立 ICE/DTLS 传输，避免视频 TCP 排队堵住按键和触控；手指移动每帧只发送最新位置，可靠通道保留下压和抬起，过期移动不会重新按下。触控板使用累计位移，即使丢失中间包，下一次位置或点击也能补齐位移。
 
 媒体进程使用 High 优先级、关闭其节能节流，不使用 Realtime。内核事件传递后台心跳，状态文件读取锁不会使进程崩溃。异常退出自动重试，旧会话清理不能无限期阻塞新连接。关机和睡眠期间不能传输，重启后需先登录 Windows。
 
@@ -44,6 +44,10 @@ node scripts/verify-signaling.mjs
 node scripts/verify-viewer-startup.mjs
 node scripts/verify-gestures.mjs
 node scripts/verify-trackpad.mjs
+node scripts/verify-motion-queue.mjs
+python scripts/verify-input-motion.py
+python scripts/verify-control-transport.py
+python scripts/verify-ice-configuration.py
 python scripts/verify-touch-fallback.py
 python scripts/verify-native-touch.py
 python scripts/verify-microphone-routing.py

@@ -57,6 +57,8 @@ const connected=await start(true);
 assert(connected.stages.includes('connected'));
 assert.equal(connected.peers[0].config.iceServers[0].username,'test');
 assert.equal(connected.peers[0].config.iceTransportPolicy,'all');
+assert.equal(connected.peers[0].config.bundlePolicy,'balanced');
+assert.equal(JSON.parse(connected.requests[0].options.body).separateControl,true);
 assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'720');
 assert.equal(connected.requests[0].options.credentials,'omit');
 const unavailable=await start(false);
@@ -312,4 +314,8 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
  viewer.channels[0].onmessage({data:JSON.stringify({type:'cursor',cursor:{x:.2,y:.3,visible:true}})});
  assert(parseFloat(viewer.nodes.remoteCursor.style.width)<=10,'Remote cursor must stay compact');
  console.log('Verified video-stall recovery, stale deadline immunity, data-channel readiness and compact cursor.');
+}
+
+{
+ const retry=await start(true);retry.peers[0].connectionState='failed';retry.peers[0].onconnectionstatechange();await retry.fireTimer(1000);assert.equal(retry.peers[1].config.iceTransportPolicy,'relay');assert.deepEqual(JSON.parse(JSON.stringify(retry.peers[1].config.iceServers[0].urls)),['turn:relay.example:3478?transport=tcp']);console.log('Verified failed paths retry on a TCP relay and negotiate separate control.');
 }

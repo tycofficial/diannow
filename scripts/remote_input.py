@@ -103,7 +103,7 @@ class RemoteInput:
         self.buttons.clear()
         if self.pressed:emit([key(vk,True) for vk in list(self.pressed)])
         self.pressed.clear()
-    def release_owner(self,owner):
+    def release_owner(self,owner,forget=True):
         with self.state_lock:
             if self.touch_owner==owner:self._release_touch();self.touch_owner=None
             state=self.owners.pop(owner,None)
@@ -112,6 +112,9 @@ class RemoteInput:
                 if not any(vk in value['keys'] for value in self.owners.values()):emit([key(vk,True)]);self.pressed.discard(vk)
             for button in state['buttons']:
                 if not any(button in value['buttons'] for value in self.owners.values()):emit([mouse({0:4,1:64,2:16}[button])]);self.buttons.discard(button)
+            if not forget:
+                state['keys'].clear();state['buttons'].clear();state['touchGesture']=None
+                self.owners[owner]=state
     def disable(self):
         self.enabled=False;self.move_sequence=0;self.error=None
         while True:
@@ -194,7 +197,17 @@ class RemoteInput:
         kind=event.get('type')
         owner=event.get('_owner','legacy')
         state=self.owners.setdefault(owner,{'keys':set(),'buttons':set()})
+        snapshot=event.get('relativeSnapshot')
+        if kind=='button' and isinstance(snapshot,dict):self._apply({'type':'relative','_owner':owner,'totalX':snapshot.get('totalX',0),'totalY':snapshot.get('totalY',0),'seq':snapshot.get('seq',0)})
         if kind=='touch':
+            if 'gesture' in event:
+                gesture=int(event['gesture']);sequence=int(event.get('touchSeq',0));phase=event.get('phase')
+                if phase=='down':
+                    if gesture<=state.get('lastTouchGesture',-1):return
+                    state['lastTouchGesture']=gesture;state['touchGesture']=gesture;state['touchSeq']=0
+                if gesture!=state.get('touchGesture') or sequence<=state.get('touchSeq',0):return
+                state['touchSeq']=sequence
+                if phase in ['up','cancel']:state['touchGesture']=None
             if event.get('phase')=='down':
                 if self.touch_owner and self.touch_owner!=owner:self._release_touch()
                 self.touch_owner=owner
@@ -208,7 +221,15 @@ class RemoteInput:
                 else:self._compatible_touch(event,owner)
                 if event.get('phase') in ['up','cancel']:self.touch_owner=None
         elif kind=='relative':
-            previous=state.get('fraction',(0,0));x=max(-2000,min(2000,float(event.get('dx',0))))+previous[0];y=max(-2000,min(2000,float(event.get('dy',0))))+previous[1]
+            if 'totalX' in event and 'totalY' in event:
+                sequence=int(event.get('seq',0))
+                if sequence<=state.get('relativeSeq',0):return
+                total_x=float(event['totalX']);total_y=float(event['totalY'])
+                if not all(-1e9<value<1e9 for value in [total_x,total_y]):return
+                previous_total=state.get('relativeTotals',(0,0));dx=total_x-previous_total[0];dy=total_y-previous_total[1]
+                state['relativeTotals']=(total_x,total_y);state['relativeSeq']=sequence
+            else:dx=float(event.get('dx',0));dy=float(event.get('dy',0))
+            previous=state.get('fraction',(0,0));x=max(-2000,min(2000,dx))+previous[0];y=max(-2000,min(2000,dy))+previous[1]
             dx=round(x);dy=round(y);state['fraction']=(x-dx,y-dy)
             if dx or dy:
                 if self.bounds:
@@ -273,4 +294,4 @@ class RemoteInput:
             if vk is None:return
             modifiers=[KEYS[m] for m in event.get('modifiers',[]) if m in ['Control','Alt','Shift','Meta']]
             self.tap(vk,modifiers)
-        elif kind=='release':self.release_owner(owner)
+        elif kind=='release':self.release_owner(owner,forget=False)
