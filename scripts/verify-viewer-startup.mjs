@@ -6,7 +6,7 @@ const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
-async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=11){
+async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12){
   const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[];let timerId=0,clockNow=Date.now();
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
@@ -321,5 +321,5 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(12);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=12/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(13);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=13/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }

@@ -35,10 +35,13 @@ async def main():
     for _ in range(16):await dtls._send_rtp(bytes([128,102])+bytes(1198))
     elapsed=asyncio.get_running_loop().time()-started
     assert elapsed>.08 and remote['relayed'] and not remote['configuredWriters'],'Remote-only relay traffic bypassed pacing'
-    assert remote['pacingBitsPerSecond']==1500000,'A static-screen estimate alone must not permanently cap throughput'
+    assert remote['pacingBitsPerSecond']==900000,'A static-screen estimate alone must not permanently cap throughput'
     sender._RTCRtpSender__rtt=.9;started=asyncio.get_running_loop().time()
     for _ in range(16):await dtls._send_rtp(bytes([128,102])+bytes(1198))
     assert asyncio.get_running_loop().time()-started>.3
     assert remote['pacingBitsPerSecond']==385000,'Confirmed RTT queue growth must restore the conservative bandwidth cap'
+    sender._RTCRtpSender__rtt=.6
+    await dtls._send_rtp(bytes([128,102]))
+    assert remote['pacingBitsPerSecond']==385000,'A brief recovery must not immediately refill the queue'
     print('Verified bounded video queue, audio progress, merged video payload types and prompt close. No network traffic.')
 asyncio.run(main())

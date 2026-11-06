@@ -27,7 +27,7 @@ try{
  $oldTask=Get-ScheduledTask -TaskName CodexDesktopViewer -ErrorAction SilentlyContinue
  if($oldTask){Export-ScheduledTask -TaskName CodexDesktopViewer | Set-Content -LiteralPath (Join-Path $backupDir 'previous-task.xml') -Encoding Unicode}
  if(-not $RuntimeOnly -and (Test-Path -LiteralPath $desktopExe)){Copy-Item -LiteralPath $desktopExe -Destination (Join-Path $backupDir 'previous-desktop.exe')}
- if(Test-Path -LiteralPath $oldInstalledExe){Copy-Item -LiteralPath $oldInstalledExe -Destination (Join-Path $backupDir 'previous-host.exe')}
+ if(-not $RuntimeOnly -and (Test-Path -LiteralPath $oldInstalledExe)){Copy-Item -LiteralPath $oldInstalledExe -Destination (Join-Path $backupDir 'previous-host.exe')}
  New-Item -ItemType File -Path (Join-Path $stateDir 'stop.request') -Force | Out-Null
  $deadline=(Get-Date).AddSeconds(20)
  do{

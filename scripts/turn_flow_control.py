@@ -7,7 +7,7 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
         existing['videoPayloadTypes'].update(video_payload_types)
         if video_sender is not None:existing['videoSenders'].append(video_sender)
         return existing
-    state={'videoPayloadTypes':set(video_payload_types),'videoSenders':[video_sender] if video_sender is not None else [],'waits':0,'skippedStaleRetransmits':0,'maxQueuedBytes':0,'configuredWriters':set(),'lastLog':0.0,'nextPacketAt':0.0,'audioEnabled':False,'pacingBitsPerSecond':0,'relayed':False,'minimumRtt':None}
+    state={'videoPayloadTypes':set(video_payload_types),'videoSenders':[video_sender] if video_sender is not None else [],'waits':0,'skippedStaleRetransmits':0,'maxQueuedBytes':0,'configuredWriters':set(),'lastLog':0.0,'nextPacketAt':0.0,'audioEnabled':False,'pacingBitsPerSecond':0,'relayed':False,'minimumRtt':None,'congestedUntil':0.0}
     dtls._turn_video_flow=state;original=dtls._send_rtp
     def queue_size():
         queued=0
@@ -49,12 +49,15 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
                 if isinstance(rtt,(int,float)) and 0<rtt<60:state['minimumRtt']=min(state['minimumRtt'] or rtt,rtt)
                 delivery=getattr(encoder,'delivery',None)
                 buffered=getattr(delivery,'last_buffer',None)
-                queued=(isinstance(rtt,(int,float)) and (rtt>1.5 or state['minimumRtt'] is not None and rtt-state['minimumRtt']>.15)) or (isinstance(buffered,(int,float)) and buffered>=150)
+                queued=(isinstance(rtt,(int,float)) and (rtt>1.5 or state['minimumRtt'] is not None and rtt-state['minimumRtt']>.075)) or (isinstance(buffered,(int,float)) and buffered>=150)
+                now=time.monotonic()
+                if queued:state['congestedUntil']=now+10
+                queued=queued or now<state['congestedUntil']
                 # Offered traffic on a static screen is not link capacity.
                 # Use a usable budget until RTT growth / receiver buffering
                 # confirms an actual queue. Audio is already reflected by
                 # receiver bandwidth feedback; do not subtract it twice.
-                budget=max(96000,min(8000000,estimate*1.1 if queued else max(1500000,estimate*1.1)))
+                budget=max(96000,min(8000000,estimate*1.1 if queued else max(900000,estimate*1.1)))
                 if encoder is not None:encoder.capacity_bitrate=max(350000,round(budget/1.1))
                 state['pacingBitsPerSecond']=round(budget)
                 delay=state['nextPacketAt']-time.monotonic()
