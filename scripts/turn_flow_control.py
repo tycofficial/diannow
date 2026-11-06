@@ -45,6 +45,7 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
                 # Respect receiver bandwidth feedback as well as local drain.
                 encoder=getattr(video_sender,'_RTCRtpSender__encoder',None) if video_sender else None
                 estimate=getattr(encoder,'requested_bitrate',2500000)
+                estimate=min(estimate,getattr(encoder,'profile_bitrate',100000000))
                 rtt=getattr(video_sender,'_RTCRtpSender__rtt',None) if video_sender else None
                 if isinstance(rtt,(int,float)) and 0<rtt<60:state['minimumRtt']=min(state['minimumRtt'] or rtt,rtt)
                 delivery=getattr(encoder,'delivery',None)
