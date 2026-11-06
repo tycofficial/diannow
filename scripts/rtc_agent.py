@@ -20,6 +20,7 @@ from audio_routing import AudioRouter
 from display_target import capture_target,displays,set_preference,activate_virtual,STATE as DISPLAY_STATE
 from low_latency_rtp import configure_video_playout_delay
 from rtp_scheduling import install_cooperative_rtp_send
+from ice_consent import install_consent_window
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
@@ -452,6 +453,7 @@ class DesktopSession:
         playout=configure_video_playout_delay(pc,offer['sdp'],maximum_ms=150)
         print(json.dumps({'sessionId':self.session_id,'videoPlayoutDelay':playout}),flush=True)
         await pc.setLocalDescription(independent_media_description(await pc.createAnswer(),cnames))
+        self.consent_state=install_consent_window(pc)
         return {'sdp':pc.localDescription.sdp,'type':pc.localDescription.type}
     async def close(self,reason='cleanup'):
         if self.close_task is None:
