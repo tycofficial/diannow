@@ -25,7 +25,7 @@ from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
 from control_transport import isolate_control
 from bitrate_stability import BitrateStability
-from stream_profile import stream_dimensions,stream_bitrate
+from stream_profile import stream_dimensions, stream_bitrate
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
@@ -222,8 +222,8 @@ class SharedFrameSource:
         with self.lock:
             if self.closed:raise RuntimeError('Desktop frame source is closed.')
             conversion_lock=self.conversion_locks.setdefault(key,threading.Lock())
-        # Different resolutions convert on their existing FrameRead workers.
-        # Same-resolution viewers share a single immutable conversion.
+        # Different resolutions may convert in parallel; viewers at one
+        # resolution share one immutable result for the current capture tick.
         with conversion_lock:
             raw,captured_at,tick=self.snapshot(after)
             with self.lock:
@@ -248,7 +248,6 @@ class SharedFrameSource:
             with self.lock:
                 if self.closed:raise RuntimeError('Desktop frame source is closed.')
                 self.conversions+=int(converted)
-                # An older conversion must never replace a newer capture tick.
                 if tick==self.tick:
                     self.converted[key]=pixels
                     while len(self.converted)>4:self.converted.popitem(last=False)

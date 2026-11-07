@@ -153,8 +153,8 @@ let pc,control,motion,sessionId,connected=false,intentional=false,connecting=fal
 let padGestures,motionQueue;let touchGestures,pendingWheel=null,remoteStream,remoteAudioStream,microphoneSender,microphoneStream,microphoneReady=false,desktopAudioAvailable=false,inputId=0,moveSequence=0,noticeTimer;
 const qualitySelect=document.getElementById('quality'),fpsSelect=document.getElementById('framerate');
 let virtualFpsApplied=false;let backendFeatures=[],legacyKeys=new Set();let activeQuality='480',sourceHeight=0,sourceRefresh=60,qualitySamples={},sampleStart=0,autoTried=false,qualityBadSamples=0,qualityGoodSeconds=0,qualityHoldUntil=0,connectionDeadline,receiverReport=null,lastReceiverReport=0,previousAudioStats=null,previousPlayoutStats=null,previousPlaybackQuality=null,inputAckMs=null,inputAckAt=null;const pendingInputTimes=new Map();
-const desktopCommandAcks=new Map();let desktopCommandRunning=false,recoveryStarted=false;
-const recoveryAction=location.hash==='#recover=restart-codex'?'restart-codex':location.hash==='#recover=task-manager'?'task-manager':null;
+const desktopCommandAcks=new Map();let desktopCommandRunning=false;
+const recoveryAction=location.hash==='#recover=restart-codex'?'restart-codex':location.hash==='#recover=task-manager'?'task-manager':null;let recoveryStarted=false;
 if(recoveryAction){const clean=new URL(location.href);clean.hash='';window.history?.replaceState(null,'',clean.href)}
 let audioContext=null,audioSource=null,audioGain=null,audioEnabled=false,audioOutputMode='off',audioGeneration=0,audioFallbackPreferred=false;
 function disconnectAudioGraph(){for(const node of [audioSource,audioGain]){try{node?.disconnect()}catch{}}audioSource=null;audioGain=null;audioOutputMode='off'}
@@ -189,7 +189,7 @@ function recordQuality(frames,elapsed){
  const v=qualitySamples[actual]||(qualitySamples[actual]={total:0,seconds:0});v.total+=Math.max(0,frames)*elapsed;v.seconds+=elapsed;updateQualityLabels();
  if(qualitySelect.value!=='auto'||actual!==activeQuality)return;
  const buffer=receiverReport?.bufferMs,knownBuffer=Number.isFinite(buffer),target=Number(fpsSelect.value)||60;
- const unhealthy=knownBuffer&&buffer>100||frames<target*.75||(receiverReport?.videoFreezeDelta||0)>0;
+ const unhealthy=(knownBuffer&&buffer>100)||frames<target*.75||(receiverReport?.videoFreezeDelta||0)>0;
  qualityBadSamples=unhealthy?qualityBadSamples+1:0;
  if(qualityBadSamples>=3&&activeQuality!=='480'){
   activeQuality='480';sampleStart=Date.now();qualityGoodSeconds=0;qualityBadSamples=0;qualityHoldUntil=Date.now()+120000;
@@ -199,41 +199,9 @@ function recordQuality(frames,elapsed){
  qualityGoodSeconds=healthy?qualityGoodSeconds+elapsed:0;
  const next=activeQuality==='480'?'720':activeQuality==='720'?'1080':null;
  if(next&&sourceHeight>=Number(next)&&qualityGoodSeconds>=60&&Date.now()>=qualityHoldUntil){
-  activeQuality=next;sampleStart=Date.now();qualityGoodSeconds=0;qualityHoldUntil=Date.now()+120000;
-  send({type:'settings',quality:activeQuality,fps:target});
+  activeQuality=next;sampleStart=Date.now();qualityGoodSeconds=0;qualityHoldUntil=Date.now()+120000;send({type:'settings',quality:activeQuality,fps:target});
  }
 }
-
-function commandInput(event){
- return new Promise((resolve,reject)=>{
-  if(!connected||!send(event)){reject(new Error('操作通道尚未连接'));return}
-  const timer=setTimeout(()=>{desktopCommandAcks.delete(event.id);reject(new Error('电脑未确认操作，请等待连接恢复'))},10000);
-  desktopCommandAcks.set(event.id,{resolve,reject,timer});
- });
-}
-function commandAck(value){
- const pending=desktopCommandAcks.get(value.id);if(!pending)return;
- desktopCommandAcks.delete(value.id);clearTimeout(pending.timer);
- if(value.error)pending.reject(new Error(value.error));else pending.resolve();
-}
-const restartCodexCommand='powershell.exe -NoProfile -WindowStyle Hidden -Command "$p=@(Get-Process -Name Codex -ErrorAction SilentlyContinue);$e=($p|Where-Object MainWindowHandle -NE 0|Select-Object -First 1).Path;if($e){$p|Where-Object Path -EQ $e|Stop-Process -Force;Start-Sleep -Seconds 2;Start-Process -FilePath $e}"';
-async function runDesktopCommand(command){
- if(desktopCommandRunning){notice('正在执行上一项操作');return}
- if(!connected||control?.readyState!=='open'){notice('请等待操作通道连接');return}
- desktopCommandRunning=true;release();
- try{
-  await commandInput({type:'key',key:'r',modifiers:['Meta']});
-  await new Promise(resolve=>setTimeout(resolve,800));
-  await commandInput({type:'text',text:command});
-  await commandInput({type:'key',key:'Enter',modifiers:[]});
-  notice(command==='taskmgr.exe'?'已请求打开任务管理器':'已请求重启 Codex，聊天将短暂中断');
- }catch(error){notice(error.message)}finally{desktopCommandRunning=false}
-}
-function tryDesktopRecovery(){
- if(!recoveryAction||recoveryStarted||!connected||control?.readyState!=='open')return;
- recoveryStarted=true;runDesktopCommand(recoveryAction==='task-manager'?'taskmgr.exe':restartCodexCommand);
-}
-
 function notice(message){document.getElementById('notice').textContent=message;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>document.getElementById('notice').textContent='',4500)}
 let viewerId;try{viewerId=window.crypto.randomUUID()}catch{viewerId=String(Date.now())+'-'+Math.random().toString(36).slice(2)}
 let remoteCursorPoint={x:.5,y:.5},cursorMovedAt=0;
@@ -247,6 +215,11 @@ function release(){releaseOsk();legacyKeys.clear();touchGestures?.cancel();padGe
 function clearModifiers(){held.clear();document.querySelectorAll('[data-mod]').forEach(button=>button.setAttribute('aria-pressed','false'))}
 function key(name,modifiers=name==='Escape'?[]:[...held]){if(!send({type:'key',key:name,modifiers}))notice('输入通道尚未连接');clearModifiers()}
 function text(value){if([...held].some(mod=>['Control','Alt','Meta'].includes(mod))&&/^[a-z0-9]+$/i.test(value)){for(const char of value)key(char)}else send({type:'text',text:held.has('Shift')?value.replace(/[a-z]/g,char=>char.toUpperCase()):value})}
+function commandInput(event){return new Promise((resolve,reject)=>{if(!connected||!send(event)){reject(new Error('操作通道尚未连接'));return}const timer=setTimeout(()=>{desktopCommandAcks.delete(event.id);reject(new Error('电脑未确认操作，请等待连接恢复'))},10000);desktopCommandAcks.set(event.id,{resolve,reject,timer})})}
+function commandAck(value){const pending=desktopCommandAcks.get(value.id);if(!pending)return;desktopCommandAcks.delete(value.id);clearTimeout(pending.timer);if(value.error)pending.reject(new Error(value.error));else pending.resolve()}
+const restartCodexCommand='powershell.exe -NoProfile -WindowStyle Hidden -Command "$p=@(Get-Process -Name Codex -ErrorAction SilentlyContinue);$e=($p|Where-Object MainWindowHandle -NE 0|Select-Object -First 1).Path;if($e){$p|Where-Object Path -EQ $e|Stop-Process -Force;Start-Sleep -Seconds 2;Start-Process -FilePath $e}"';
+async function runDesktopCommand(command){if(desktopCommandRunning){notice('正在执行上一项操作');return}if(!connected||control?.readyState!=='open'){notice('请等待操作通道连接');return}desktopCommandRunning=true;release();try{await commandInput({type:'key',key:'r',modifiers:['Meta']});await new Promise(resolve=>setTimeout(resolve,800));await commandInput({type:'text',text:command});await commandInput({type:'key',key:'Enter',modifiers:[]});notice(command==='taskmgr.exe'?'已请求打开任务管理器':'已请求重启 Codex，聊天将短暂中断')}catch(error){notice(error.message)}finally{desktopCommandRunning=false}}
+function tryDesktopRecovery(){if(!recoveryAction||recoveryStarted||!connected||control?.readyState!=='open')return;recoveryStarted=true;runDesktopCommand(recoveryAction==='task-manager'?'taskmgr.exe':restartCodexCommand)}
 async function closeConnection(){clearTimeout(connectionDeadline);clearTimeout(recoveryTimer);clearTimeout(answerRecoveryTimer);lastPong=0;send({type:'audioState',enabled:false});send({type:'microphoneState',enabled:false});send({type:'disconnect'});release();motionQueue?.reset();connected=false;document.getElementById('remoteCursor').hidden=true;resetAudioOutput();if(microphoneStream){microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null}document.getElementById('microphone').setAttribute('aria-pressed','false');video.srcObject=null;desktopAudio.srcObject=null;for(const stream of [remoteStream,remoteAudioStream])stream?.getTracks().forEach(track=>track.stop());remoteStream=null;remoteAudioStream=null;desktopAudioAvailable=false;previousStats=null;previousAudioStats=null;previousPlayoutStats=null;previousPlaybackQuality=null;pendingInputTimes.clear();inputAckMs=null;inputAckAt=null;receiverReport=null;lastReceiverReport=0;sourceFps=0;if(pc){const old=pc;pc=null;await old.close()}}
 function bindChannel(channel){const peer=pc;channel.onopen=()=>{if(channel===control&&peer===pc){lastPong=Date.now();if(connected)statusEl.textContent='已连接 · 操作可用';tryDesktopRecovery()}};channel.onmessage=event=>{if(channel!==control&&channel!==motion)return;try{const value=JSON.parse(event.data);if(value.type==='cursor'){if(performance.now()-cursorMovedAt>100)paintCursor(value.cursor)}else if(value.type==='pong'){lastPong=Date.now();if(performance.now()-cursorMovedAt>150)paintCursor(value.cursor);backendFeatures=value.inputFeatures||[];pingRtt=performance.now()-value.time;sourceFps=value.fps;sourceHeight=value.source?.height||sourceHeight;sourceRefresh=value.source?.refresh||60;updateQualityLabels();microphoneReady=Boolean(value.microphoneReady);desktopAudioAvailable=Boolean(value.audio);if(value.display){document.getElementById('displayMode').value=value.display.virtual?(sourceHeight>=2160?'virtual4k':'virtual'):'original';if(value.display.virtual&&sourceRefresh>=120&&!virtualFpsApplied){virtualFpsApplied=true;fpsSelect.value='120';send({type:'settings',quality:activeQuality,fps:120})}}if(value.inputError)notice(value.inputError);document.getElementById('backendInfo').textContent='电脑后台独立运行 · 源屏幕 '+sourceHeight+'P / '+sourceRefresh+'Hz';document.getElementById('audioInfo').textContent=(value.audioIndependent?'独立音频路由已就绪：本机扬声器静音不影响远程声音':'独立音频路由未就绪：'+(value.audioRouteError||value.audioError||'正在初始化虚拟声卡'))+'；麦克风 '+(microphoneReady?'已就绪':'等待 VB-CABLE 安装完成')}else if(value.type==='inputAck'){const sentAt=pendingInputTimes.get(value.id);if(sentAt!==undefined){inputAckAt=performance.now();inputAckMs=Math.max(0,inputAckAt-sentAt);pendingInputTimes.delete(value.id)}commandAck(value);typingAck(value);if(value.error){notice(value.error);window.desktopBoot.stage('input-error',value.error)}}}catch{}}}
 async function connect(){
@@ -379,9 +352,7 @@ for(const name of keys){const button=document.createElement('button');button.tex
 for(const [label,name,modifiers] of [['全选','a',['Control']],['复制','c',['Control']],['粘贴','v',['Control']],['剪切','x',['Control']],['撤销','z',['Control']],['切换窗口','Tab',['Alt']]]){const button=document.createElement('button');button.textContent=label;button.onclick=()=>key(name,modifiers);document.getElementById('keys').appendChild(button)}
 document.getElementById('more').onclick=()=>document.getElementById('keys').classList.toggle('open');
 document.getElementById('right').onclick=()=>{send({type:'move',...lastPoint});send({type:'button',button:2,down:true});send({type:'button',button:2,down:false})};
-document.getElementById('moveWindow').onclick=()=>key('ArrowRight',['Meta','Shift']);document.getElementById('escape').onclick=()=>key('Escape',[]);
-document.getElementById('taskManager').onclick=()=>runDesktopCommand('taskmgr.exe');
-document.getElementById('restartCodex').onclick=()=>runDesktopCommand(restartCodexCommand);
+document.getElementById('moveWindow').onclick=()=>key('ArrowRight',['Meta','Shift']);document.getElementById('escape').onclick=()=>key('Escape',[]);document.getElementById('taskManager').onclick=()=>runDesktopCommand('taskmgr.exe');document.getElementById('restartCodex').onclick=()=>runDesktopCommand(restartCodexCommand);
 document.getElementById('audio').onclick=async()=>{if(audioEnabled){if(audioOutputMode.startsWith('webaudio')&&audioContext&&audioContext.state!=='running'){await enableAudio(true);return}audioEnabled=false;send({type:'audioState',enabled:false});audioGeneration++;disconnectAudioGraph();desktopAudio.muted=true;document.getElementById('audio').textContent='开启声音';return}if(!connected){notice('请等待电脑连接');return}if(!desktopAudioAvailable||!audioTracksReady()){notice('电脑声音通道尚未就绪');return}audioEnabled=true;await enableAudio(true)};
 document.getElementById('audioMode').onchange=async()=>{audioFallbackPreferred=document.getElementById('audioMode').value==='compatible';audioGeneration++;disconnectAudioGraph();desktopAudio.muted=true;if(!connected||!desktopAudioAvailable||!audioTracksReady()){audioEnabled=false;document.getElementById('audio').textContent='开启声音';notice('电脑声音通道尚未就绪');return}audioEnabled=true;await enableAudio(true)};
 document.getElementById('microphone').onclick=async()=>{if(microphoneStream){send({type:'microphoneState',enabled:false});await microphoneSender.replaceTrack(null);microphoneStream.getTracks().forEach(track=>track.stop());microphoneStream=null;document.getElementById('microphone').setAttribute('aria-pressed','false');return}if(!connected){notice('请等待电脑连接');return}if(!microphoneReady){notice('电脑尚未配置虚拟麦克风，暂时无法送入 Codex');return}try{microphoneStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});await microphoneSender.replaceTrack(microphoneStream.getAudioTracks()[0]);send({type:'microphoneState',enabled:true});document.getElementById('microphone').setAttribute('aria-pressed','true')}catch(error){notice('麦克风未开启：'+error.message)}};
@@ -406,7 +377,7 @@ function fitViewport(){if(window.visualViewport&&document.documentElement?.style
 window.visualViewport?.addEventListener('resize',fitViewport);window.addEventListener('resize',fitViewport);fitViewport();
 let updateRequested=false;
 async function checkForUpdate(){
- if(updateRequested||desktopCommandRunning||document.hidden||typing.value||oskHeld.size||touchGestures?.pointers.size||padGestures?.pointers.size)return;
+ if(updateRequested||document.hidden||typing.value||oskHeld.size||touchGestures?.pointers.size||padGestures?.pointers.size)return;
  try{const reply=await api('/api/version',{cache:'no-store'});if(!reply.ok)return;const info=await reply.json();if(Number.isInteger(info.build)&&info.build>VIEWER_BUILD){const next=new URL(location.href);if(next.searchParams.get('_release')===String(info.build))return;next.searchParams.set('_release',String(info.build));updateRequested=true;release();location.replace(next.href)}}catch{}
 }
 window.desktopBoot.stage('ready');checkForUpdate();connect();setInterval(checkForUpdate,60000);
