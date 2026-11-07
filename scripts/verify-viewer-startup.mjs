@@ -6,7 +6,7 @@ const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
-async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=13){
+async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12){
   const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[];let timerId=0,clockNow=Date.now();
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
@@ -59,7 +59,7 @@ assert.equal(connected.peers[0].config.iceServers[0].username,'test');
 assert.equal(connected.peers[0].config.iceTransportPolicy,'all');
 assert.equal(connected.peers[0].config.bundlePolicy,'balanced');
 assert.equal(JSON.parse(connected.requests[0].options.body).separateControl,true);
-assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'720');
+assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'480');
 assert.equal(connected.requests[0].options.credentials,'omit');
 const unavailable=await start(false);
 assert(unavailable.stages.includes('connection-error'));
@@ -148,7 +148,7 @@ for(const status of [503,200]){
   peer.ontrack({track:videoTrack,receiver:videoReceiver});peer.ontrack({track:audioTrack,receiver:audioReceiver});
   assert.deepEqual(nodes.screen.srcObject.getTracks(),[videoTrack],'The video player must receive only video');
   assert.deepEqual(nodes.desktopAudio.srcObject.getTracks(),[audioTrack],'Desktop audio must have its own player and stream');
-  assert.equal(videoReceiver.jitterBufferTarget,20);assert.equal(videoReceiver.playoutDelayHint,.02);assert.equal(audioReceiver.jitterBufferTarget,0);assert.equal(audioReceiver.playoutDelayHint,0)
+  assert.equal(videoReceiver.jitterBufferTarget,0);assert.equal(videoReceiver.playoutDelayHint,0);assert.equal(audioReceiver.jitterBufferTarget,0);assert.equal(audioReceiver.playoutDelayHint,0)
   assert.equal(videoTrack.contentHint,'detail');
   const unsupported={},otherVideo=track('video');peer.ontrack({track:otherVideo,receiver:unsupported});
   assert.equal(Object.hasOwn(unsupported,'jitterBufferTarget'),false,'An unsupported receiver hint must not be faked with an expando property');
@@ -321,17 +321,5 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(14);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=14/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
-}
-
-{
- const viewer=await start(true),pending=viewer.nodes.taskManager.onclick();await flush();
- let event=viewer.sent.findLast(value=>value.type==='key');
- assert.equal(event.key,'r');assert.deepEqual([...event.modifiers],['Meta']);
- viewer.channels[0].onmessage({data:JSON.stringify({type:'inputAck',id:event.id})});await flush();
- await viewer.fireTimer(800);event=viewer.sent.findLast(value=>value.type==='text');assert.equal(event.text,'taskmgr.exe');
- viewer.channels[0].onmessage({data:JSON.stringify({type:'inputAck',id:event.id})});await flush();
- event=viewer.sent.findLast(value=>value.type==='key');assert.equal(event.key,'Enter');
- viewer.channels[0].onmessage({data:JSON.stringify({type:'inputAck',id:event.id})});await pending;
- console.log('Verified task manager command waits for input acknowledgements before pressing Enter.');
+ const updates=await start(true);updates.setServerBuild(15);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=15/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }

@@ -25,6 +25,7 @@ from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
 from control_transport import isolate_control
 from bitrate_stability import BitrateStability
+from stream_profile import stream_dimensions, stream_bitrate
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
@@ -114,13 +115,14 @@ class DeliveryPolicy:
 
 class FastH264Encoder(H264Encoder):
     @property
-    def target_bitrate(self):return getattr(self,'capacity_bitrate',getattr(self,'requested_bitrate',2000000))
+    def target_bitrate(self):return min(getattr(self,'profile_bitrate',100000000),getattr(self,'capacity_bitrate',getattr(self,'requested_bitrate',2000000)))
     @target_bitrate.setter
     def target_bitrate(self,value):
         self.requested_bitrate=max(350000,min(int(value),100000000))
         if getattr(self,'delivery',None):self.delivery.bandwidth=self.requested_bitrate
     def _encode_frame(self, frame, force_keyframe):
         metadata=frame.opaque if isinstance(frame.opaque,dict) else {'fps':frame.opaque or 60}
+        self.profile_bitrate=stream_bitrate(frame.width,frame.height,metadata['fps'])
         self.delivery=metadata.get('delivery')
         if self.delivery:self.delivery.bandwidth=self.target_bitrate
         if self.codec and (self.codec.width!=frame.width or self.codec.height!=frame.height):self.codec=None
@@ -190,7 +192,7 @@ class SharedFrameSource:
     def __init__(self,camera,refresh=60,clock=time.perf_counter,hardware=False):
         self.camera=camera;self.refresh=max(1,refresh);self.clock=clock;self.lock=threading.Lock();self.closed=False
         self.raw=None;self.tick=None;self.captured_at=None;self.converted=OrderedDict();self.reformatter=av.video.reformatter.VideoReformatter()
-        self.grabs=0;self.conversions=0;self.hardware=hardware
+        self.grabs=0;self.conversions=0;self.hardware=hardware;self.conversion_locks={};self.local=threading.local()
         self.condition=threading.Condition();self.reader=None;self.generation=0;self.reader_error=None
     def _capture(self):
         while not self.closed:
@@ -216,29 +218,39 @@ class SharedFrameSource:
             if self.closed:raise RuntimeError('Desktop frame source is closed.')
             return self.raw,self.captured_at,self.generation
     def get_yuv(self,width,height,after=None):
-        started=self.clock()
-        raw,captured_at,tick=self.snapshot(after)
+        started=self.clock();key=(width,height)
         with self.lock:
             if self.closed:raise RuntimeError('Desktop frame source is closed.')
-            if not self.camera.is_capturing:raise RuntimeError('Desktop capture stopped.')
-            if tick!=self.tick:self.tick=tick;self.converted.clear()
-            ready=self.clock();key=(width,height)
-            if key in self.converted:
-                pixels=self.converted[key];self.converted.move_to_end(key)
-            else:
-                if self.hardware and raw.shape[:2]==(height,width):
-                    pixels=raw;self.converted[key]=pixels
-                    while len(self.converted)>4:self.converted.popitem(last=False)
+            conversion_lock=self.conversion_locks.setdefault(key,threading.Lock())
+        # Different resolutions may convert in parallel; viewers at one
+        # resolution share one immutable result for the current capture tick.
+        with conversion_lock:
+            raw,captured_at,tick=self.snapshot(after)
+            with self.lock:
+                if self.closed:raise RuntimeError('Desktop frame source is closed.')
+                if not self.camera.is_capturing:raise RuntimeError('Desktop capture stopped.')
+                if self.tick is None or tick>self.tick:self.tick=tick;self.converted.clear()
+                ready=self.clock()
+                if tick==self.tick and key in self.converted:
+                    pixels=self.converted[key];self.converted.move_to_end(key)
                     return pixels,captured_at,ready-started,self.clock()-ready
-                if self.hardware and cv2 is not None:
-                    pixels=cv2.resize(raw,(width,height),interpolation=cv2.INTER_LINEAR)
-                else:
-                    frame=av.VideoFrame.from_numpy_buffer(raw,format='bgra')
-                    frame=self.reformatter.reformat(frame,width=width,height=height,format='bgra' if self.hardware else 'yuv420p',threads=2,interpolation='BILINEAR')
-                    pixels=frame.to_ndarray()
-                pixels.setflags(write=False)
-                self.converted[key]=pixels;self.conversions+=1
-                while len(self.converted)>4:self.converted.popitem(last=False)
+            converted=False
+            if self.hardware and raw.shape[:2]==(height,width):pixels=raw
+            elif self.hardware and cv2 is not None:
+                pixels=cv2.resize(raw,(width,height),interpolation=cv2.INTER_LINEAR);converted=True
+            else:
+                reformatter=getattr(self.local,'reformatter',None)
+                if reformatter is None:self.local.reformatter=reformatter=av.video.reformatter.VideoReformatter()
+                frame=av.VideoFrame.from_numpy_buffer(raw,format='bgra')
+                frame=reformatter.reformat(frame,width=width,height=height,format='bgra' if self.hardware else 'yuv420p',threads=2,interpolation='BILINEAR')
+                pixels=frame.to_ndarray();converted=True
+            pixels.setflags(write=False)
+            with self.lock:
+                if self.closed:raise RuntimeError('Desktop frame source is closed.')
+                self.conversions+=int(converted)
+                if tick==self.tick:
+                    self.converted[key]=pixels
+                    while len(self.converted)>4:self.converted.popitem(last=False)
             return pixels,captured_at,ready-started,self.clock()-ready
     def close(self):
         with self.condition:self.closed=True;self.condition.notify_all()
@@ -263,7 +275,7 @@ class DesktopTrack(VideoStreamTrack):
         now=time.perf_counter();self.first=self.first or now
         # Never share AVFrame metadata/pict_type across encoder threads.
         frame=av.VideoFrame.from_numpy_buffer(pixels,format='bgra' if pixels.ndim==3 else 'yuv420p')
-        frame.opaque={'fps':self.fps,'delivery':self.delivery,'sessionId':self.session_id,'preparedAt':now}
+        frame.opaque={'fps':self.fps,'delivery':self.delivery,'sessionId':self.session_id,'preparedAt':now,'capturedAt':captured_at}
         frame.pts=round((now-self.first)*90000);frame.time_base=fractions.Fraction(1,90000)
         self.read_frames=getattr(self,'read_frames',0)+1
         self.read_total=getattr(self,'read_total',0)+read_time;self.convert_total=getattr(self,'convert_total',0)+convert_time
@@ -281,7 +293,7 @@ class DesktopTrack(VideoStreamTrack):
         self.last_delivery=deadline
         frame=await self.prefetch
         prepared=getattr(frame,'opaque',None)
-        if isinstance(prepared,dict) and time.perf_counter()-prepared.get('preparedAt',time.perf_counter())>.05:
+        if isinstance(prepared,dict) and (frame.width!=self.width or frame.height!=self.height or time.perf_counter()-prepared.get('capturedAt',prepared.get('preparedAt',time.perf_counter()))>min(.05,2/self.fps)):
             frame=await loop.run_in_executor(self.capture_pool,self.read_frame)
         self.sent+=1;self.frame_samples.append((time.perf_counter(),self.sent))
         # A single prepared frame overlaps conversion with the previous
@@ -393,8 +405,7 @@ class DesktopSession:
         print(json.dumps({'sessionId':self.session_id,'offerVersion':str(offer.get('viewerVersion','legacy'))[:32],'separateControlRequested':bool(offer.get('separateControl')),'offeredMedia':[{'kind':media.kind,'mid':media.rtp.muxId,'port':media.port,'candidateTypes':sorted({candidate.type for candidate in media.ice_candidates})} for media in offered.media]}),flush=True)
         preferences=offer.get('preferences',{})
         fps=max(15,min(120,self.refresh,int(preferences.get('fps',60))))
-        width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(preferences.get('quality')),self.source_width))
-        height=max(2,round(self.source_height*width/self.source_width)//2*2);width=width//2*2
+        width,height=stream_dimensions(self.source_width,self.source_height,preferences.get('quality','480'))
         if not self.camera.is_capturing:self.camera.start(target_fps=min(120,self.refresh),video_mode=True)
         self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=getattr(self.owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])))
         self.track=track=DesktopTrack(self.camera,width,height,fps,self.session_id,frame_source=self.owner.frame_source)
@@ -440,8 +451,7 @@ class DesktopSession:
                         self.report_receiver(event)
                         channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
                     elif event.get('type')=='settings':
-                        target_width=min(self.source_width,{'720':1280,'1080':1920,'2160':3840}.get(str(event.get('quality')),self.source_width))//2*2
-                        track.width=target_width;track.height=max(2,round(self.source_height*target_width/self.source_width)//2*2)
+                        track.width,track.height=stream_dimensions(self.source_width,self.source_height,event.get('quality','480'))
                         track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.delivery=DeliveryPolicy(track.fps)
                     elif event.get('type')=='display' and event.get('mode') in ['original','virtual']:
                         if event['mode']=='virtual' and not any(d['virtual'] and d['attached'] for d in displays()):raise RuntimeError('Virtual display not ready')

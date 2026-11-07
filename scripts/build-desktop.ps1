@@ -4,7 +4,7 @@ $project = Split-Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $project
 $python = Join-Path $project '.venv\Scripts\python.exe'
 $stdlib = & $python -c "import sysconfig; print(sysconfig.get_path('stdlib'))"
-$cacheRoot=if(Test-Path -LiteralPath 'D:\'){ 'D:\CodexBuildCache\remote-desktop' }else{Join-Path $project 'outputs\pyinstaller'}
+$cacheRoot=Join-Path $project 'work\pyinstaller-local'
 $arguments = @('-m','PyInstaller','--noconfirm','--onedir','--windowed','--name','RemoteDesktop','--paths','scripts','--collect-all','av','--collect-all','aiortc','--collect-all','pyaudiowpatch','--collect-all','dxcam','--collect-all','cv2','--distpath','outputs/host','--workpath',$cacheRoot,'--specpath','outputs')
 $runtimeCertificates = Join-Path $stdlib 'codex-rejected-cas.pem'
 if (Test-Path -LiteralPath $runtimeCertificates) { $arguments += @('--add-data',($runtimeCertificates+';.')) }
