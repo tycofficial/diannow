@@ -23,7 +23,10 @@ from rtp_scheduling import install_cooperative_rtp_send
 from ice_consent import install_consent_window
 from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
+from turn_route import select_udp_turn_route
 from control_transport import isolate_control
+from encoded_pipeline import install_encoded_pipeline
+from video_retransmission import install_video_retransmission
 from bitrate_stability import BitrateStability
 from stream_profile import stream_dimensions, stream_bitrate
 
@@ -37,14 +40,15 @@ def signaling_proxy():
         with socket.create_connection(('127.0.0.1',7890),timeout=.2):return 'http://127.0.0.1:7890'
     except OSError:return None
 
-def desktop_ice_servers(config):
+def desktop_ice_servers(config,turn_transport=None):
     servers=[]
     for server in config.get('iceServers',[]):
         urls=server.get('urls',[]);urls=[urls] if isinstance(urls,str) else urls
-        # Keep STUN so the desktop can advertise a public UDP mapping and
-        # attempt direct Internet ICE. Filtering only TURN/TCP forced many
-        # otherwise viable networks onto the distant relay.
-        supported=[value for value in urls if isinstance(value,str) and (value.startswith('stun:') or value.startswith('turns:') or value.startswith('turn:') and 'transport=tcp' in value)]
+        # Keep direct candidates and the proved UDP relay first. aiortc uses
+        # the first TURN URL, so the asynchronous selector checks reachability
+        # before moving a UDP variant ahead of the existing TCP fallback.
+        supported=[value for value in urls if isinstance(value,str) and value.startswith(('stun:','turn:','turns:'))]
+        if turn_transport=='tcp':supported=[value for value in supported if value.startswith(('stun:','turns:')) or 'transport=tcp' in value]
         if supported:servers.append(RTCIceServer(urls=supported,username=server.get('username'),credential=server.get('credential')))
     return servers
 
@@ -155,7 +159,7 @@ class FastH264Encoder(H264Encoder):
                     if encoder=='libx264':codec.profile='Baseline'
                     level='6.0' if frame.width*frame.height*target_fps>3840*2160*60 else ('5.2' if frame.width*frame.height>1920*1080 else '4.2')
                     codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cbr','profile':'constrained_baseline','forced_idr':'1','async_depth':'1','enforce_hrd':'1','filler_data':'0'} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
-                    codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic();self.applied_bitrate=self.target_bitrate;self.applied_profile=profile;self.parameter_sets={}
+                    codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic();self.applied_bitrate=self.target_bitrate;self.applied_profile=profile;self.parameter_sets={};self.codec_generations=getattr(self,'codec_generations',0)+1
                     print(json.dumps({'encoder':encoder,'targetFps':target_fps,'fixedProfile':self.fixed_profile,'bitrate':self.applied_bitrate,'sessionId':metadata.get('sessionId')}),flush=True);break
                 except Exception as error:
                     if encoder=='h264_amf':self.hardware_failed=True
@@ -394,7 +398,7 @@ class DesktopSession:
         self.source_width=owner.source_width;self.source_height=owner.source_height;self.refresh=owner.refresh
         self.pc=None;self.track=None;self.audio_track=None;self.mic_sink=None;self.mic_task=None;self.closed=False;self.audio_error=None;self.move_sequence=0
         self.session_id=session_id or str(uuid.uuid4());self.created_at=time.monotonic();self.last_activity=self.created_at;self.watchdog=None;self.answer_result=None;self.close_task=None
-        self.fps_samples=deque();self.last_report_log=0
+        self.fps_samples=deque();self.last_report_log=0;self.video_enabled=True
     def recent_fps(self,track,now=None):
         now=time.perf_counter() if now is None else now
         self.fps_samples.append((now,track.sent))
@@ -405,14 +409,35 @@ class DesktopSession:
         now=time.monotonic() if now is None else now
         report=event.get('receiverReport')
         if not isinstance(report,dict):return
-        fields=['fps','receivedFps','presentedFps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoReceivedDelta','videoPresentedDelta','videoPresentationSource','videoPresentationAgeMs','viewerVisible','videoPaused','videoKeyFramesDelta','videoPliDelta','videoNackDelta','videoFreezeDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
+        fields=['fps','receivedFps','presentedFps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoReceivedDelta','videoPresentedDelta','videoPresentationSource','videoPresentationAgeMs','viewerVisible','videoPaused','videoRequestedEnabled','videoKeyFramesDelta','videoPliDelta','videoNackDelta','videoFreezeDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
         values={key:value for key in fields if isinstance(value:=report.get(key),(int,float)) and not isinstance(value,bool) and math.isfinite(value)}
+        requested=values.get('videoRequestedEnabled',values.get('viewerVisible'))
+        if requested in (0,1):self.set_video_enabled(bool(requested))
         if getattr(self,'track',None):self.track.delivery.receiver_feedback(values,now=now)
         if now-self.last_report_log<5:return
         if values:
             self.last_report_log=now
             diagnostics=self.track.delivery_diagnostics() if getattr(self,'track',None) else {}
-            print(json.dumps({'sessionId':self.session_id,'receiverReport':values,**diagnostics}),flush=True)
+            print(json.dumps({'wallTime':round(time.time(),3),'sessionId':self.session_id,'receiverReport':values,'videoDiagnostics':self.video_diagnostics(),**diagnostics}),flush=True)
+    def video_diagnostics(self):
+        sender=getattr(self,'video_sender',None)
+        encoder=getattr(sender,'_RTCRtpSender__encoder',None)
+        result={'videoEnabled':getattr(self,'video_enabled',True),'selectedTurnTransport':getattr(getattr(self,'owner',None),'selected_turn_transport','unchanged')}
+        connection=getattr(getattr(getattr(sender,'transport',None),'transport',None),'_connection',None)
+        if connection is not None:
+            result['turnClientTransport']=getattr(connection,'turn_transport',None)
+            result['candidatePairs']=[{'local':pair.local_candidate.type,'remote':pair.remote_candidate.type} for pair in getattr(connection,'_nominated',{}).values()]
+            result['turnTcpRoutes']=sorted({route for pair in getattr(connection,'_nominated',{}).values() if (route:=getattr(pair.protocol.transport,'_desktop_turn_route',None))})
+        if encoder is not None:result.update(targetBitrate=getattr(encoder,'target_bitrate',None),fixedProfile=getattr(encoder,'fixed_profile',False),codecGenerations=getattr(encoder,'codec_generations',0))
+        pipeline=getattr(sender,'_encoded_pipeline',None)
+        if pipeline is not None:result['pipeline']=dict(pipeline.stats)
+        history=getattr(sender,'_video_retransmission',None)
+        if history is not None:result['retransmission']=dict(history)
+        flow=getattr(self,'turn_flow',None)
+        if flow is not None:result['pacing']={key:flow.get(key) for key in ('pacingBitsPerSecond','waits','maxQueuedBytes','skippedStaleRetransmits')}
+        rtt=getattr(sender,'_RTCRtpSender__rtt',None)
+        if isinstance(rtt,(int,float)):result['videoRttMs']=round(rtt*1000,2)
+        return result
     def expired(self,now=None):
         now=time.monotonic() if now is None else now
         if self.closed:return True
@@ -423,9 +448,19 @@ class DesktopSession:
         if state=='connected':return self.media_failure() is not None
         if state=='disconnected':return now-self.last_activity>90
         return now-self.created_at>35
+    def set_video_enabled(self,enabled):
+        enabled=bool(enabled)
+        if enabled!=getattr(self,'video_enabled',True):
+            self.media_progress=None
+            pipeline=getattr(getattr(self,'video_sender',None),'_encoded_pipeline',None)
+            if enabled and pipeline is not None:pipeline.invalidate()
+        self.video_enabled=enabled
+        track=getattr(self,'track',None)
+        pc=getattr(self,'pc',None)
+        if track is not None:track.set_streaming(enabled and pc is not None and pc.connectionState=='connected')
     def media_failure(self,now=None):
         """A live data channel cannot keep a dead video sender alive forever."""
-        if self.closed or not self.pc or self.pc.connectionState!='connected':
+        if self.closed or not self.pc or self.pc.connectionState!='connected' or not getattr(self,'video_enabled',True):
             self.media_progress=None;return None
         track=getattr(self,'track',None);sender=getattr(self,'video_sender',None)
         if track is None or sender is None:return None
@@ -443,14 +478,19 @@ class DesktopSession:
         offered=sdp.SessionDescription.parse(offer['sdp'])
         print(json.dumps({'sessionId':self.session_id,'offerVersion':str(offer.get('viewerVersion','legacy'))[:32],'separateControlRequested':bool(offer.get('separateControl')),'offeredMedia':[{'kind':media.kind,'mid':media.rtp.muxId,'port':media.port,'candidateTypes':sorted({candidate.type for candidate in media.ice_candidates})} for media in offered.media]}),flush=True)
         preferences=offer.get('preferences',{})
+        self.video_enabled=preferences.get('videoEnabled') is not False
         fps=max(15,min(120,self.refresh,int(preferences.get('fps',60))))
         width,height=stream_dimensions(self.source_width,self.source_height,preferences.get('quality','480'))
         if not self.camera.is_capturing:self.camera.start(target_fps=min(120,self.refresh),video_mode=True)
-        self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=getattr(self.owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])))
+        servers=getattr(self.owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])
+        if preferences.get('relayTransport')=='tcp':servers=desktop_ice_servers(getattr(self.owner,'ice_config',{}),turn_transport='tcp') or servers
+        self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=servers))
         self.track=track=DesktopTrack(self.camera,width,height,fps,self.session_id,frame_source=self.owner.frame_source,fixed_profile=preferences.get('fixedProfile') is True)
         track.set_streaming(False)
         cnames={'video':self.session_id+'-video','audio':self.session_id+'-audio'}
         self.video_sender=pc.addTrack(track);independent_media_sender(self.video_sender,cnames['video']);self.last_keyframe_request=0
+        install_encoded_pipeline(self.video_sender)
+        install_video_retransmission(self.video_sender)
         print(json.dumps({'sessionId':self.session_id,'streamStarted':True,'width':width,'height':height,'targetFps':fps}),flush=True)
         if 'm=audio' in offer.get('sdp',''):
             try:
@@ -489,7 +529,9 @@ class DesktopSession:
                     self.last_activity=time.monotonic()
                     if event.get('type')=='ping':
                         self.report_receiver(event)
-                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
+                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'videoEnabled':self.video_enabled,'videoDiagnostics':self.video_diagnostics(),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
+                    elif event.get('type')=='videoState':
+                        if isinstance(event.get('enabled'),bool):self.set_video_enabled(event['enabled'])
                     elif event.get('type')=='settings':
                         track.width,track.height=stream_dimensions(self.source_width,self.source_height,event.get('quality','480'))
                         track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.fixed_profile=event.get('fixedProfile',track.fixed_profile) is True;track.delivery=DeliveryPolicy(track.fps,fixed=track.fixed_profile)
@@ -534,7 +576,7 @@ class DesktopSession:
             if pc.sctp:
                 for pair in pc.sctp.transport.transport._connection._nominated.values():pairs.append({'local':pair.local_candidate.type,'remote':pair.remote_candidate.type})
             print(json.dumps({'sessionId':self.session_id,'connection':pc.connectionState,'ageSeconds':round(time.monotonic()-self.created_at,1),'candidatePairs':pairs}),flush=True)
-            if self.track is not None:self.track.set_streaming(pc.connectionState=='connected')
+            if self.track is not None:self.track.set_streaming(pc.connectionState=='connected' and self.video_enabled)
             if pc.connectionState=='connected':self.last_activity=time.monotonic()
             self.owner.update_input_state()
             if pc.connectionState in ['failed','closed']:asyncio.create_task(self.close('transport-'+pc.connectionState))
@@ -682,8 +724,13 @@ async def run_agent():
                             ice_refresh=time.monotonic();phase='ice-config'
                             async with session.get(url+'/api/ice',proxy=proxy) as response:
                                 if response.status==200:
-                                    ice=await response.json();servers=desktop_ice_servers(ice)
-                                    if servers:agent.ice_servers=servers
+                                    ice=await select_udp_turn_route(await response.json());servers=desktop_ice_servers(ice)
+                                    if servers:
+                                        agent.ice_servers=servers
+                                        agent.ice_config=ice
+                                        selected=ice.get('selectedTurnTransport','unchanged')
+                                        if selected!=getattr(agent,'selected_turn_transport',None):print(json.dumps({'selectedTurnTransport':selected}),flush=True)
+                                        agent.selected_turn_transport=selected
                         phase='poll'
                         async with session.get(url+'/api/agent/poll',proxy=proxy) as response:
                             if response.status!=200:raise RuntimeError('Private Site authorization: HTTP '+str(response.status))

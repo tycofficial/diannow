@@ -25,6 +25,17 @@ async def main():
     except ConnectionError:pass
     else:raise AssertionError('Closed transport must interrupt a waiting video')
     assert state['waits']>0 and state['maxQueuedBytes']==16000
+    # A pending Windows UDP datagram is not a TCP stream backlog. Its TURN
+    # path still uses the packet pacer, with no arbitrary 8KB/5ms gate.
+    udp_writer=Writer()
+    udp_pair=SimpleNamespace(protocol=SimpleNamespace(transport=SimpleNamespace(_TurnTransport__inner_protocol=SimpleNamespace(transport=udp_writer))),local_candidate=SimpleNamespace(type='relay'),remote_candidate=SimpleNamespace(type='relay'))
+    udp_connection=SimpleNamespace(_nominated={1:udp_pair},_closed=False,turn_transport='udp')
+    udp_dtls=SimpleNamespace(transport=SimpleNamespace(_connection=udp_connection),state='connected',_send_rtp=send)
+    udp_sender=SimpleNamespace(_RTCRtpSender__rtp_task=asyncio.current_task(),_RTCRtpSender__encoder=SimpleNamespace(fixed_profile=True,profile_bitrate=8000000))
+    udp=install_turn_flow_control(udp_dtls,[102],video_sender=udp_sender)
+    for _ in range(8):await asyncio.wait_for(udp_dtls._send_rtp(bytes([128,102])+bytes(1198)),.05)
+    assert udp['waits']==udp['maxQueuedBytes']==udp['skippedStaleRetransmits']==0
+    assert udp['relayed'] and not udp['configuredWriters']
     # The desktop can use a UDP host/srflx socket while only the phone's
     # incoming leg uses TURN/TCP. Its queue is invisible to our socket.
     pair=SimpleNamespace(protocol=SimpleNamespace(transport=object()),local_candidate=SimpleNamespace(type='host'),remote_candidate=SimpleNamespace(type='relay'))
@@ -47,5 +58,5 @@ async def main():
     sender._RTCRtpSender__encoder.profile_bitrate=8000000
     await dtls._send_rtp(bytes([128,102]))
     assert remote['pacingBitsPerSecond']==9200000,'Fixed 1080P must retain its selected bitrate plus packet overhead despite noisy REMB'
-    print('Verified bounded video queue, audio progress, merged video payload types and prompt close. No network traffic.')
+    print('Verified TCP backlog bounds, UDP pacing without TCP gates, audio progress, merged video payload types and prompt close. No network traffic.')
 asyncio.run(main())

@@ -6,7 +6,7 @@ const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
-async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12,sessionStorage){
+async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12,sessionStorage,initialHidden=false,iceConfiguration){
   const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[],animationFrames=[],documentListeners={};let timerId=0,clockNow=Date.now();
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
@@ -33,12 +33,12 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   function setTimer(callback,delay){if(wrongReceiver(this))throw new TypeError('Can only call Window.setTimeout on instances of Window');timers.set(++timerId,{callback,delay});return timerId}
   function clearTimer(id){if(wrongReceiver(this))throw new TypeError('Can only call Window.clearTimeout on instances of Window');timers.delete(id)}
   const navigator={audioSession:{type:'auto'}};
-  const document={hidden:false,getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(type,listener){(documentListeners[type]??=[]).push(listener)}};
+  const document={hidden:initialHidden,getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(type,listener){(documentListeners[type]??=[]).push(listener)}};
   const context=vm.createContext({window,navigator,document,
     location:{hostname:'screen.example',href:'https://screen.example/',replace(value){navigations.push(value)}},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(callback){animationFrames.push(callback)},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},URL,AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
-    fetch:async(path,options)=>{if(path.endsWith('/api/version'))return {ok:true,json:async()=>({build:serverBuild})};if(path.endsWith('/api/ice'))return {ok:true,json:async()=>({iceServers:[{urls:'turn:relay.example:3478?transport=tcp',username:'test',credential:'test'}],relayAvailable:true})};requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
+    fetch:async(path,options)=>{if(path.endsWith('/api/version'))return {ok:true,json:async()=>({build:serverBuild})};if(path.endsWith('/api/ice'))return {ok:true,json:async()=>iceConfiguration||({iceServers:[{urls:'turn:relay.example:3478?transport=tcp',username:'test',credential:'test'}],relayAvailable:true})};requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
   // Reproduce a host that already has common top-level names. Viewer must stay scoped.
   vm.runInContext('const video=1, keys=2, pc=3;',context);
   for(const script of sources)vm.runInContext(script,context);
@@ -169,7 +169,7 @@ for(const status of [503,200]){
   peer.stats=stats(3000,180,undefined,undefined);await viewer.intervals[0]();assert.match(nodes.stats.textContent,/缓冲 — ms/,'Unsupported delay statistics must not appear as zero');
   const reports=()=>viewer.sent.filter(event=>event.receiverReport);
   assert.equal(reports().length,1,'The prior valid measurement must ride the next ping');
-  assert.deepEqual(reports()[0].receiverReport,{receivedFps:null,presentedFps:null,videoReceivedDelta:null,videoPresentedDelta:null,videoPresentationSource:null,videoPresentationAgeMs:null,viewerVisible:1,videoPaused:null,audioRms:null,audioEnabled:0,audioContextState:null,audioOutputMode:0,audioElementMuted:1,fps:60,bufferMs:300,lossDelta:1,decodeMs:4,mbps:.05,inputAckMs:null,inputAckAgeMs:null,audioBufferMs:null,audioTotalSamplesDuration:null,audioTotalSamplesReceived:null,audioConcealedSamplesDelta:null,audioPlayoutSamplesDuration:null,audioTotalPlayoutDelay:null,audioTotalSamplesCount:null,audioPlayoutMs:null,audioBaseLatencyMs:null,audioOutputLatencyMs:null,videoDecodedDelta:60,videoKeyFramesDelta:null,videoPliDelta:null,videoNackDelta:null,videoFreezeDelta:null,videoDroppedDelta:null,playbackFramesDelta:null,playbackDroppedDelta:null});
+  assert.deepEqual(reports()[0].receiverReport,{receivedFps:null,presentedFps:null,videoReceivedDelta:null,videoPresentedDelta:null,videoPresentationSource:null,videoPresentationAgeMs:null,viewerVisible:1,videoRequestedEnabled:1,videoPaused:null,audioRms:null,audioEnabled:0,audioContextState:null,audioOutputMode:0,audioElementMuted:1,fps:60,bufferMs:300,lossDelta:1,decodeMs:4,mbps:.05,inputAckMs:null,inputAckAgeMs:null,audioBufferMs:null,audioTotalSamplesDuration:null,audioTotalSamplesReceived:null,audioConcealedSamplesDelta:null,audioPlayoutSamplesDuration:null,audioTotalPlayoutDelay:null,audioTotalSamplesCount:null,audioPlayoutMs:null,audioBaseLatencyMs:null,audioOutputLatencyMs:null,videoDecodedDelta:60,videoKeyFramesDelta:null,videoPliDelta:null,videoNackDelta:null,videoFreezeDelta:null,videoDroppedDelta:null,playbackFramesDelta:null,playbackDroppedDelta:null});
   await viewer.intervals[0]();assert.equal(reports().length,1,'Receiver reports must be throttled rather than sent every second');
   viewer.advanceTime(5000);await viewer.intervals[0]();assert.equal(reports().length,2);assert.equal(reports()[1].receiverReport.bufferMs,null,'Unsupported buffer statistics must be reported as unknown');
   const videoStream=nodes.screen.srcObject,audioStream=nodes.desktopAudio.srcObject;
@@ -324,7 +324,7 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(17);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=17/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(18);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=18/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }
 
 const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,clientY:100,button:0,preventDefault(){},...overrides});
@@ -475,4 +475,60 @@ console.log('Verified dead-decoder recovery despite incoming frames, unavailable
  const missing=stats(3);delete missing.get('video').transportId;peer.stats=missing;viewer.advanceTime(1000);await viewer.intervals[0]();
  assert.match(viewer.nodes.stats.textContent,/视频往返 — ms/,'Ambiguous multi-transport RTT must remain unknown');
  console.log('Verified video-specific transport RTT and safe unknown fallback.');
+
+{
+ const mock=mockAudioContext(),viewer=await start(true,scripts,undefined,mock.MockContext),peer=viewer.peers[0],control=viewer.channels[0],screen=viewer.nodes.screen;
+ attachAudio(viewer);await viewer.nodes.audio.onclick();const context=mock.contexts[0],audioStream=viewer.nodes.desktopAudio.srcObject;
+ const videoTrack={kind:'video',stopped:false,stop(){this.stopped=true}};peer.ontrack({track:videoTrack,receiver:{}});
+ let pauses=0;screen.pause=()=>pauses++;
+ const audioEvents=viewer.sent.filter(e=>['audioState','microphoneState'].includes(e.type)).length,disconnects=viewer.sent.filter(e=>e.type==='disconnect').length,settings=viewer.sent.filter(e=>e.type==='settings').length;
+ control.bufferedAmount=65536;viewer.document.hidden=true;viewer.dispatchDocument('visibilitychange',{});
+ assert.equal(pauses,1);assert.match(viewer.nodes.stats.textContent,/后台画面已暂停/);assert.equal(videoTrack.stopped,false,'Hiding preserves the incoming video track for resume');
+ control.bufferedAmount=0;control.onbufferedamountlow();assert.deepEqual(viewer.sent.filter(e=>e.type==='videoState').at(-1),{type:'videoState',enabled:false},'A congested hide transition reliably pauses its own sender');
+ assert.equal(viewer.sent.filter(e=>['audioState','microphoneState'].includes(e.type)).length,audioEvents,'Pausing video must not change desktop sound or microphone state');
+ assert.equal(viewer.nodes.desktopAudio.srcObject,audioStream);assert.equal(context.sources.at(-1).disconnected,false);assert.equal(viewer.sent.filter(e=>e.type==='disconnect').length,disconnects);assert.equal(viewer.peers.length,1);
+ viewer.advanceTime(20000);await viewer.intervals[0]();assert(!viewer.sent.some(e=>e.type==='video-recover'),'Hidden zero FPS is intentional and must not request recovery');
+ const plays=screen.playCalls;viewer.document.hidden=false;viewer.dispatchDocument('visibilitychange',{});await flush();
+ assert.deepEqual(viewer.sent.filter(e=>e.type==='videoState').at(-1),{type:'videoState',enabled:true});assert.equal(screen.playCalls,plays+1);assert.equal(screen.muted,true);assert.equal(screen.playsInline,true);
+ assert.equal(viewer.sent.filter(e=>e.type==='settings').length,settings,'Visibility transitions preserve fixed quality, frame-rate and bitrate settings');
+ assert.equal(viewer.peers[0],peer);assert.equal(viewer.nodes.desktopAudio.srcObject,audioStream);
+ viewer.document.hidden=true;control.onopen();assert.equal(viewer.sent.filter(e=>e.type==='videoState').at(-1).enabled,false,'A newly open control channel immediately reconciles hidden video state');
+ viewer.channels[0].onmessage({data:JSON.stringify({type:'pong',videoEnabled:true})});assert.equal(viewer.sent.filter(e=>e.type==='videoState').at(-1).enabled,false,'A stale server state is corrected without changing the stream profile');
+}
+{
+ const viewer=await start(true,scripts,undefined,undefined,12,undefined,true),peer=viewer.peers[0];
+ const offer=JSON.parse(viewer.requests.find(e=>e.path==='/api/offer').options.body);assert.equal(offer.preferences.videoEnabled,false);assert.equal(offer.preferences.quality,'1080');assert.equal(offer.preferences.fps,60);assert.equal(offer.preferences.fixedProfile,true);
+ peer.ontrack({track:{kind:'video',stop(){}},receiver:{}});assert.equal(viewer.nodes.screen.playCalls,0,'A page connected in the background must not start its video element');assert.equal(viewer.sent.filter(e=>e.type==='videoState').at(-1).enabled,false);
+}
+{
+ const viewer=await start(true),screen=viewer.nodes.screen;screen.playFailure=true;
+ viewer.document.hidden=true;viewer.dispatchDocument('visibilitychange',{});viewer.document.hidden=false;viewer.dispatchDocument('visibilitychange',{});await flush();assert.match(viewer.nodes.overlay.textContent,/轻点画面恢复播放/);
+ for(const gap of [4000,6000,6000]){viewer.advanceTime(gap);await viewer.intervals[0]();await flush()}
+ assert(!viewer.sent.some(e=>e.type==='video-recover'),'A known Safari playback rejection must not trigger repeated encoder keyframes');assert.equal(viewer.peers.length,1,'Playback permission cannot be fixed by reconnecting the peer');
+ screen.playFailure=false;const plays=screen.playCalls;viewer.dispatchWindow('pointerdown',{});await flush();assert.equal(screen.playCalls,plays+1,'The next user touch retries rejected video playback');
+ viewer.dispatchWindow('pointerdown',{});assert.equal(screen.playCalls,plays+1,'Successful playback does not keep replaying on every touch');
+}
+console.log('Verified reliable per-session background video suspension, preserved audio and fixed profile, hidden startup and Safari gesture resume without keyframe storms.');
+
+{
+ const config={relayAvailable:true,iceServers:[
+  {urls:'turn:192.0.2.7:3478?transport=tcp',username:'original-user',credential:'original-password',credentialType:'password'},
+  {urls:['turn:[2001:db8::7]:3478?transport=tcp','turn:plain.example','turns:secure.example:5349?transport=tcp','turns:default-tls.example'],username:'ipv6-user',credential:'ipv6-password'},
+  {urls:['turn:existing.example:3478?transport=tcp','turn:existing.example'],username:'plain-user',credential:'plain-password'},
+  {urls:'TURN:upper.example:3478?transport=TCP',username:'case-user',credential:'case-password'},
+  {urls:'stun:stun.example:3478'}
+ ]},before=JSON.stringify(config),viewer=await start(true,scripts,undefined,undefined,12,undefined,false,config);
+ const normalized=JSON.parse(JSON.stringify(viewer.peers[0].config.iceServers));
+ assert.deepEqual(normalized[0].urls,['turn:192.0.2.7:3478?transport=udp','turn:192.0.2.7:3478?transport=tcp'],'The first configured TURN endpoint gathers UDP before its original TCP fallback');
+ assert.deepEqual(normalized[1].urls,['turn:[2001:db8::7]:3478?transport=udp','turn:[2001:db8::7]:3478?transport=tcp','turn:plain.example','turns:secure.example:5349?transport=tcp','turns:default-tls.example'],'IPv6 brackets, plain TURN and secure TURN must retain their hosts, ports and schemes');
+ assert.deepEqual(normalized[2].urls,['turn:existing.example','turn:existing.example:3478?transport=tcp'],'Reuse an existing plain UDP endpoint instead of duplicating its allocation');
+ assert.deepEqual(normalized[3].urls,['TURN:upper.example:3478?transport=udp','TURN:upper.example:3478?transport=TCP']);assert.deepEqual(normalized[4].urls,['stun:stun.example:3478']);
+ for(let index=0;index<config.iceServers.length;index++)for(const key of ['username','credential','credentialType'])assert.equal(normalized[index][key],config.iceServers[index][key],'TURN credentials must pass through unchanged');
+ assert.equal(JSON.stringify(config),before,'Normalization must not mutate the API response');
+ viewer.peers[0].connectionState='failed';viewer.peers[0].onconnectionstatechange();await viewer.fireTimer(1000);
+ const fallbacks=JSON.parse(JSON.stringify(viewer.peers[1].config.iceServers));assert.deepEqual(fallbacks[1].urls,['turn:[2001:db8::7]:3478?transport=tcp','turns:secure.example:5349?transport=tcp','turns:default-tls.example'],'Relay retry retains every configured TCP and TLS fallback');
+ assert.equal(JSON.parse(viewer.requests.filter(request=>request.path==='/api/offer').at(-1).options.body).preferences.relayTransport,'tcp','Relay retry asks the desktop to change its own TURN client transport too');
+ assert(fallbacks.every(server=>server.urls.every(url=>!url.includes('transport=udp'))));
+}
+console.log('Verified same-endpoint UDP-first browser candidates, IPv6/plain/TLS URI safety, retained TCP/TLS fallbacks and unchanged API credentials. No media or network was used.');
 }

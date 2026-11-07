@@ -15,6 +15,10 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
         for pair in dtls.transport._connection._nominated.values():
             state['relayed']=state['relayed'] or any(getattr(getattr(pair,name,None),'type',None)=='relay' for name in ['local_candidate','remote_candidate'])
             inner=getattr(pair.protocol.transport,'_TurnTransport__inner_protocol',None)
+            # UDP has no TCP stream backlog or head-of-line queue. On Windows
+            # its asynchronous datagram writer may briefly report pending
+            # bytes; applying the 8KB TCP gate adds 5ms stalls to paced UDP.
+            if getattr(dtls.transport._connection,'turn_transport',None)=='udp':continue
             writer=getattr(inner,'transport',None)
             if writer is None or not hasattr(writer,'get_write_buffer_size'):continue
             if id(writer) not in state['configuredWriters']:
