@@ -6,12 +6,12 @@ const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
-async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12){
+async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12,sessionStorage){
   const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[],animationFrames=[],documentListeners={};let timerId=0,clockNow=Date.now();
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
     const listeners={};
-    nodes[id]={style:{},children:[],textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
+    nodes[id]={style:{},children:[],textContent:'',value:id==='quality'?'1080':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
       classList:{toggle(){open=!open;return open}},attributes:{},setAttribute(name,value){this.attributes[name]=String(value)},appendChild(child){this.children.push(child)},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){this.focusCalls=(this.focusCalls||0)+1},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
   }
   class Peer{
@@ -26,7 +26,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
     async getStats(){return this.stats||new Map()}
     close(){this.connectionState='closed';this.onconnectionstatechange?.()}
   }
-  const windowListeners={};const window={addEventListener(type,listener){(windowListeners[type]??=[]).push(listener)},isSecureContext:true,AudioContext:AudioContextClass};window.self=window;window.top=window;
+  const windowListeners={};const window={addEventListener(type,listener){(windowListeners[type]??=[]).push(listener)},isSecureContext:true,AudioContext:AudioContextClass,sessionStorage};window.self=window;window.top=window;
   // WebKit rejects Window timer functions invoked as methods of TouchGestures.
   // Bare global calls and calls on Window remain valid.
   function wrongReceiver(value){return value&&Object.prototype.toString.call(value.pointers)==='[object Map]'}
@@ -60,7 +60,9 @@ assert.equal(connected.peers[0].config.iceServers[0].username,'test');
 assert.equal(connected.peers[0].config.iceTransportPolicy,'all');
 assert.equal(connected.peers[0].config.bundlePolicy,'balanced');
 assert.equal(JSON.parse(connected.requests[0].options.body).separateControl,true);
-assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'480');
+assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'1080');
+assert.equal(JSON.parse(connected.requests[0].options.body).preferences.fps,60);
+assert.equal(JSON.parse(connected.requests[0].options.body).preferences.fixedProfile,true);
 assert.equal(connected.requests[0].options.credentials,'omit');
 const unavailable=await start(false);
 assert(unavailable.stages.includes('connection-error'));
@@ -162,12 +164,12 @@ for(const status of [503,200]){
   const stats=(timestamp,framesDecoded,jitterBufferDelay,jitterBufferEmittedCount)=>new Map([['video',{type:'inbound-rtp',kind:'video',timestamp,framesDecoded,bytesReceived:framesDecoded*100,jitterBufferDelay,jitterBufferEmittedCount,packetsLost:timestamp/1000,totalDecodeTime:framesDecoded*.004}]]);
   peer.stats=stats(1000,60,18,60);await viewer.intervals[0]();peer.stats=stats(2000,120,36,120);await viewer.intervals[0]();
   assert.match(nodes.stats.textContent,/缓冲 300 ms/,'The buffer statistic must remain the measured 300 ms dwell, not the requested zero hint');
-  assert.match(nodes.stats.textContent,/接收 60 fps · 发送 60 fps/,'Receiver and sender frame rates must remain distinguishable');
+  assert.match(nodes.stats.textContent,/解码 60 fps · 发送 60 fps/,'Receiver and sender frame rates must remain distinguishable');
   assert.equal(peers.length,1,'A high jitter buffer must not trigger reconnection');
   peer.stats=stats(3000,180,undefined,undefined);await viewer.intervals[0]();assert.match(nodes.stats.textContent,/缓冲 — ms/,'Unsupported delay statistics must not appear as zero');
   const reports=()=>viewer.sent.filter(event=>event.receiverReport);
   assert.equal(reports().length,1,'The prior valid measurement must ride the next ping');
-  assert.deepEqual(reports()[0].receiverReport,{audioRms:null,audioEnabled:0,audioContextState:null,audioOutputMode:0,audioElementMuted:1,fps:60,bufferMs:300,lossDelta:1,decodeMs:4,mbps:.05,inputAckMs:null,inputAckAgeMs:null,audioBufferMs:null,audioTotalSamplesDuration:null,audioTotalSamplesReceived:null,audioConcealedSamplesDelta:null,audioPlayoutSamplesDuration:null,audioTotalPlayoutDelay:null,audioTotalSamplesCount:null,audioPlayoutMs:null,audioBaseLatencyMs:null,audioOutputLatencyMs:null,videoDecodedDelta:60,videoKeyFramesDelta:null,videoPliDelta:null,videoNackDelta:null,videoFreezeDelta:null,videoDroppedDelta:null,playbackFramesDelta:null,playbackDroppedDelta:null});
+  assert.deepEqual(reports()[0].receiverReport,{receivedFps:null,presentedFps:null,videoReceivedDelta:null,videoPresentedDelta:null,videoPresentationSource:null,videoPresentationAgeMs:null,viewerVisible:1,videoPaused:null,audioRms:null,audioEnabled:0,audioContextState:null,audioOutputMode:0,audioElementMuted:1,fps:60,bufferMs:300,lossDelta:1,decodeMs:4,mbps:.05,inputAckMs:null,inputAckAgeMs:null,audioBufferMs:null,audioTotalSamplesDuration:null,audioTotalSamplesReceived:null,audioConcealedSamplesDelta:null,audioPlayoutSamplesDuration:null,audioTotalPlayoutDelay:null,audioTotalSamplesCount:null,audioPlayoutMs:null,audioBaseLatencyMs:null,audioOutputLatencyMs:null,videoDecodedDelta:60,videoKeyFramesDelta:null,videoPliDelta:null,videoNackDelta:null,videoFreezeDelta:null,videoDroppedDelta:null,playbackFramesDelta:null,playbackDroppedDelta:null});
   await viewer.intervals[0]();assert.equal(reports().length,1,'Receiver reports must be throttled rather than sent every second');
   viewer.advanceTime(5000);await viewer.intervals[0]();assert.equal(reports().length,2);assert.equal(reports()[1].receiverReport.bufferMs,null,'Unsupported buffer statistics must be reported as unknown');
   const videoStream=nodes.screen.srcObject,audioStream=nodes.desktopAudio.srcObject;
@@ -206,11 +208,11 @@ for(const status of [503,200]){
 {
   const snapshot=(id,ssrc,timestamp,frames,delay=frames*.029)=>new Map([['video',{id,ssrc,type:'inbound-rtp',kind:'video',timestamp,framesDecoded:frames,bytesReceived:frames*1000,jitterBufferDelay:delay,jitterBufferEmittedCount:frames}]]);
   for(const value of [snapshot('next',1,3000,180),snapshot('first',2,3000,180),snapshot('first',1,2000,180),snapshot('first',1,1500,180)]){
-    const viewer=await start(true),peer=viewer.peers[0];peer.stats=snapshot('first',1,1000,60);await viewer.intervals[0]();peer.stats=snapshot('first',1,2000,120);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/接收 60 fps/);
-    peer.stats=value;await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/接收 — fps/,'Changed stream or invalid interval must reset frame-rate measurement');assert.match(viewer.nodes.stats.textContent,/画面缓冲 — ms/);assert(!viewer.nodes.stats.textContent.includes('声音缓冲'),'No audio metric must be fabricated for a video-only report');
+    const viewer=await start(true),peer=viewer.peers[0];peer.stats=snapshot('first',1,1000,60);await viewer.intervals[0]();peer.stats=snapshot('first',1,2000,120);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/解码 60 fps/);
+    peer.stats=value;await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/解码 — fps/,'Changed stream or invalid interval must reset frame-rate measurement');assert.match(viewer.nodes.stats.textContent,/画面缓冲 — ms/);assert(!viewer.nodes.stats.textContent.includes('声音缓冲'),'No audio metric must be fabricated for a video-only report');
     viewer.advanceTime(5000);await viewer.intervals[0]();const report=viewer.sent.findLast(event=>event.receiverReport).receiverReport;for(const field of ['fps','bufferMs','decodeMs','mbps','videoDecodedDelta'])assert.equal(report[field],null,field+' must be unknown for a changed stream or invalid interval');
-    const last=value.get('video');peer.stats=snapshot(last.id,last.ssrc,last.timestamp+1000,last.framesDecoded+60);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/接收 60 fps/);
-    peer.stats=new Map([['video',{id:last.id,ssrc:last.ssrc,type:'inbound-rtp',kind:'video',timestamp:last.timestamp+2000,bytesReceived:400000}]]);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/接收 — fps/);assert.match(viewer.nodes.stats.textContent,/画面缓冲 — ms/);
+    const last=value.get('video');peer.stats=snapshot(last.id,last.ssrc,last.timestamp+1000,last.framesDecoded+60);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/解码 60 fps/);
+    peer.stats=new Map([['video',{id:last.id,ssrc:last.ssrc,type:'inbound-rtp',kind:'video',timestamp:last.timestamp+2000,bytesReceived:400000}]]);await viewer.intervals[0]();assert.match(viewer.nodes.stats.textContent,/解码 — fps/);assert.match(viewer.nodes.stats.textContent,/画面缓冲 — ms/);
   }
 }
 function mockAudioContext(options={}){
@@ -322,7 +324,7 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(16);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=16/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(17);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=17/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }
 
 const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,clientY:100,button:0,preventDefault(){},...overrides});
@@ -385,4 +387,92 @@ console.log('Verified congested touch boundaries, stale-input expiry, lost point
  viewer.channels[0].bufferedAmount=0;viewer.nodes.sendTyping.onclick();
  assert.equal(viewer.sent.at(-1).text,'保留未发送的文字');
  console.log('Verified failed live text is retained as a sendable draft.');
+
+{
+ const viewer=await start(true),peer=viewer.peers[0],control=viewer.channels[0];
+ for(const gap of [4000,6000,3001]){viewer.advanceTime(gap);control.onmessage({data:JSON.stringify({type:'pong',time:0})});await viewer.intervals[0]();await flush()}
+ assert(viewer.sent.filter(e=>e.type==='video-recover').length>=2,'Try key-frame recovery before replacing a stalled video session');
+ assert.equal(viewer.peers.length,2,'A dead video sender must reconnect after bounded recovery even while control pongs remain healthy');
+ assert(viewer.stages.includes('video-stall-reconnect'));
+}
+{
+ const viewer=await start(true),peer=viewer.peers[0],screen=viewer.nodes.screen,callbacks=new Map();let callbackId=0;
+ screen.requestVideoFrameCallback=callback=>{callbacks.set(++callbackId,callback);return callbackId};screen.cancelVideoFrameCallback=id=>callbacks.delete(id);
+ peer.ontrack({track:{kind:'video',stop(){}},receiver:{}});
+ const present=count=>{const [id,callback]=callbacks.entries().next().value;callbacks.delete(id);callback(0,{presentedFrames:count})};
+ const snapshot=second=>new Map([['video',{id:'video',type:'inbound-rtp',kind:'video',timestamp:second*1000,framesReceived:second*60,framesDecoded:second*60,bytesReceived:second*100000,jitterBufferEmittedCount:second*60,jitterBufferDelay:second*.3}]]);
+ for(let second=1;second<=3;second++){viewer.advanceTime(1000);present(second*20);peer.stats=snapshot(second);await viewer.intervals[0]()}
+ assert.match(screen.srcObject.getTracks()[0].kind,/video/);
+ assert.match(viewer.nodes.stats.textContent,/解码 60 fps/);assert.match(viewer.nodes.stats.textContent,/显示 20 fps/,'Decode throughput must not be labeled as smooth presentation');
+ const firstRecovery=viewer.sent.filter(e=>e.type==='video-recover').length,plays=screen.playCalls;
+ for(let second=4;second<=8;second++){viewer.advanceTime(1000);peer.stats=snapshot(second);await viewer.intervals[0]()}
+ assert.equal(viewer.sent.filter(e=>e.type==='video-recover').length,firstRecovery,'A stalled compositor with healthy decoding must not request encoder keyframes');
+ assert(screen.playCalls>plays,'Resume the existing video player when composition stalls');assert.equal(viewer.peers.length,1);
+ const report=viewer.sent.findLast(e=>e.receiverReport)?.receiverReport;
+ assert.equal(report.receivedFps,60);assert.equal(report.fps,60);assert.equal(report.presentedFps,0);assert.equal(report.videoPresentationSource,1);
+ viewer.document.hidden=true;viewer.dispatchDocument('visibilitychange',{});const hiddenPlays=screen.playCalls;
+ viewer.advanceTime(20000);peer.stats=snapshot(28);await viewer.intervals[0]();assert.equal(screen.playCalls,hiddenPlays,'A hidden tab must not trigger video recovery');assert.equal(viewer.peers.length,1);
+ viewer.document.hidden=false;viewer.dispatchDocument('visibilitychange',{});assert.equal(screen.playCalls,hiddenPlays+1,'Returning to the visible page resumes its existing player');
+ assert(viewer.stages.includes('video-resume'));present(600);peer.stats=snapshot(29);await viewer.intervals[0]();assert.equal(viewer.peers.length,1,'Hidden time must not count toward a stalled-stream reconnect');
+ await viewer.nodes.stop.onclick();assert.equal(callbacks.size,0,'Disconnect cancels its frame observer');
+}
+{
+ const viewer=await start(true),peer=viewer.peers[0];let calls=0,resolve;
+ peer.getStats=()=>{calls++;return new Promise(done=>resolve=done)};
+ const pending=viewer.intervals[0]();await viewer.intervals[0]();assert.equal(calls,1,'Slow statistics calls must not overlap or apply samples out of order');resolve(new Map());await pending;
+}
+console.log('Verified bounded dead-video recovery with live controls, measured compositor FPS, playback-only recovery, visible resume and serialized statistics sampling.');
+
+{
+ const viewer=await start(true),peer=viewer.peers[0],control=viewer.channels[0];
+ const sample=second=>new Map([['video',{type:'inbound-rtp',kind:'video',timestamp:second*1000,framesReceived:second*60,framesDecoded:0,bytesReceived:second*100000}]]);
+ peer.stats=sample(1);await viewer.intervals[0]();let second=1;
+ for(const gap of [4000,6000,3001]){second+=gap/1000;viewer.advanceTime(gap);peer.stats=sample(second);control.onmessage({data:JSON.stringify({type:'pong',time:0})});await viewer.intervals[0]();await flush()}
+ assert.equal(viewer.peers.length,2,'Complete received frames and healthy pongs cannot preserve a decoder that remains dead after repeated keyframe requests');
+}
+for(const stuck of ['pending','rejected']){
+ const viewer=await start(true),peer=viewer.peers[0],control=viewer.channels[0];let calls=0,resolve;
+ peer.getStats=()=>{calls++;return stuck==='pending'?new Promise(done=>resolve=done):Promise.reject(new Error('Statistics unavailable'))};
+ const pending=viewer.intervals[0]();if(stuck==='rejected')await pending;
+ const before=viewer.sent.filter(e=>e.type==='ping').length;
+ for(const gap of [4000,6000,3001]){viewer.advanceTime(gap);control.onmessage({data:JSON.stringify({type:'pong',time:0})});await viewer.intervals[0]();await flush()}
+ assert(viewer.sent.filter(e=>e.type==='ping').length>before,'Unavailable statistics cannot stop control heartbeats');
+ assert.equal(viewer.peers.length,2,'Unavailable statistics cannot disable the video watchdog');
+ if(stuck==='pending'){assert.equal(calls,1);resolve(new Map());await pending}
+}
+{
+ const storage=()=>{const values=new Map();return {getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,String(value))}},tab=storage();
+ const offerId=viewer=>JSON.parse(viewer.requests.find(e=>e.path==='/api/offer').options.body).viewerId;
+ const first=await start(true,scripts,undefined,undefined,12,tab),reload=await start(true,scripts,undefined,undefined,12,tab),other=await start(true,scripts,undefined,undefined,12,storage());
+ assert.equal(offerId(first),offerId(reload),'Reloading the same tab must replace its earlier server session');assert.notEqual(offerId(first),offerId(other),'A fresh tab storage receives a distinct viewer identity');
+ const blocked=await start(true,scripts,undefined,undefined,12,{getItem(){throw new Error('Storage denied')},setItem(){throw new Error('Storage denied')}});assert(offerId(blocked),'Unavailable session storage still permits connection');
+ const before=first.sent.filter(e=>e.type==='disconnect').length;
+ first.document.hidden=true;first.dispatchDocument('visibilitychange',{});assert.equal(first.sent.filter(e=>e.type==='disconnect').length,before,'A temporary hidden page keeps its session');
+ first.channels[0].bufferedAmount=65536;first.dispatchWindow('pagehide',{});assert.equal(first.sent.at(-1).type,'disconnect','Leaving the page sends a final disconnect even while ordinary input is queued');
+}
+console.log('Verified dead-decoder recovery despite incoming frames, unavailable-statistics recovery, per-tab session identity and final page disconnect.');
+}
+
+{
+ const viewer=await start(true);
+ viewer.channels[0].onmessage({data:JSON.stringify({type:'pong',time:0,source:{height:1080,refresh:120},display:{virtual:true}})});
+ assert.equal(viewer.nodes.framerate.value,'60','A 120Hz source must not override the fixed 60fps selection');
+ viewer.nodes.quality.value='720';viewer.nodes.quality.onchange();assert.equal(viewer.sent.at(-1).fixedProfile,true);
+ viewer.nodes.quality.value='auto';viewer.nodes.quality.onchange();assert.equal(viewer.sent.at(-1).fixedProfile,false);
+ console.log('Verified fixed 1080P60 default, explicit automatic mode and no source-refresh override.');
+}
+
+{
+ const viewer=await start(true),peer=viewer.peers[0];
+ const stats=second=>new Map([
+ ['video',{id:'video',type:'inbound-rtp',kind:'video',transportId:'media',timestamp:second*1000,framesDecoded:second*60,bytesReceived:second*100000}],
+ ['media',{type:'transport',selectedCandidatePairId:'video-pair'}],
+ ['video-pair',{type:'candidate-pair',state:'succeeded',nominated:true,currentRoundTripTime:.012}],
+ ['control-pair',{type:'candidate-pair',state:'succeeded',nominated:true,currentRoundTripTime:.600}]
+ ]);
+ peer.stats=stats(1);await viewer.intervals[0]();viewer.advanceTime(1000);peer.stats=stats(2);await viewer.intervals[0]();
+ assert.match(viewer.nodes.stats.textContent,/视频往返 12 ms/,'Video RTT must follow its own ICE transport, not the last reported control pair');
+ const missing=stats(3);delete missing.get('video').transportId;peer.stats=missing;viewer.advanceTime(1000);await viewer.intervals[0]();
+ assert.match(viewer.nodes.stats.textContent,/视频往返 — ms/,'Ambiguous multi-transport RTT must remain unknown');
+ console.log('Verified video-specific transport RTT and safe unknown fallback.');
 }

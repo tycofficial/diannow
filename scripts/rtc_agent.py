@@ -11,7 +11,7 @@ try:
     cv2.setNumThreads(2)
 except ImportError:cv2=None
 from aiohttp import web
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender, VideoStreamTrack, MediaStreamTrack, sdp
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender, VideoStreamTrack, MediaStreamTrack, MediaStreamError, sdp
 from aiortc.codecs.h264 import H264Encoder
 import aiortc.codecs, aiortc.rtcrtpsender
 from remote_input import RemoteInput
@@ -82,18 +82,23 @@ def independent_media_description(description,cnames):
     return RTCSessionDescription(sdp=str(parsed),type=description.type)
 
 class DeliveryPolicy:
-    def __init__(self,max_fps):
-        self.max_fps=max_fps;self.fps=max_fps;self.bandwidth=14000000;self.frame_bytes=0;self.updated=0
-        self.last_feedback=None;self.last_buffer=None;self.congestion_streak=0;self.reason='target-no-confirmed-congestion'
+    def __init__(self,max_fps,fixed=False):
+        self.max_fps=max_fps;self.fps=max_fps;self.fixed=bool(fixed);self.bandwidth=14000000;self.frame_bytes=0;self.updated=0
+        self.last_feedback=None;self.last_buffer=None;self.congestion_streak=0;self.reason='fixed-profile' if self.fixed else 'target-no-confirmed-congestion'
     def observe(self,size,now=None):
         self.frame_bytes=size if not self.frame_bytes else self.frame_bytes*.96+size*.04
+        if self.fixed:return
         now=time.monotonic() if now is None else now
         # REMB may measure a mostly static desktop's offered traffic rather
         # than path capacity. Never turn that estimate alone into a hard cap.
         if self.fps<self.max_fps and now-self.updated>=5 and (self.last_feedback is None or now-self.last_feedback>=5):
             self.fps=min(self.max_fps,self.fps+5);self.updated=now;self.reason='probe-without-recent-congestion-feedback'
     def receiver_feedback(self,report,now=None):
+        if self.fixed:return
         now=time.monotonic() if now is None else now
+        # Hidden mobile pages throttle decoding/presentation. Their stale
+        # buffer is not evidence that the active network needs a lower FPS.
+        if report.get('viewerVisible')==0:return
         buffer=report.get('bufferMs');loss=report.get('lossDelta')
         number=lambda value:isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value)
         if not number(buffer) or buffer<0:return
@@ -115,18 +120,22 @@ class DeliveryPolicy:
 
 class FastH264Encoder(H264Encoder):
     @property
-    def target_bitrate(self):return min(getattr(self,'profile_bitrate',100000000),getattr(self,'capacity_bitrate',getattr(self,'requested_bitrate',2000000)))
+    def target_bitrate(self):
+        if getattr(self,'fixed_profile',False):return self.profile_bitrate
+        return min(getattr(self,'profile_bitrate',100000000),getattr(self,'capacity_bitrate',getattr(self,'requested_bitrate',2000000)))
     @target_bitrate.setter
     def target_bitrate(self,value):
         self.requested_bitrate=max(350000,min(int(value),100000000))
-        if getattr(self,'delivery',None):self.delivery.bandwidth=self.requested_bitrate
+        if getattr(self,'delivery',None) and not getattr(self,'fixed_profile',False):self.delivery.bandwidth=self.requested_bitrate
     def _encode_frame(self, frame, force_keyframe):
         metadata=frame.opaque if isinstance(frame.opaque,dict) else {'fps':frame.opaque or 60}
+        self.fixed_profile=metadata.get('fixedProfile') is True
         self.profile_bitrate=stream_bitrate(frame.width,frame.height,metadata['fps'])
         self.delivery=metadata.get('delivery')
         if self.delivery:self.delivery.bandwidth=self.target_bitrate
-        if self.codec and (self.codec.width!=frame.width or self.codec.height!=frame.height):self.codec=None
-        if self.codec and self.codec.name=='h264_amf':
+        profile=(frame.width,frame.height,int(metadata['fps']),self.fixed_profile)
+        if self.codec and getattr(self,'applied_profile',None)!=profile:self.codec=None;force_keyframe=True
+        if self.codec and self.codec.name=='h264_amf' and not self.fixed_profile:
             applied=getattr(self,'applied_bitrate',self.codec.bit_rate)
             if not getattr(self,'rate_stability',None):self.rate_stability=BitrateStability()
             if self.rate_stability.should_change(applied,self.target_bitrate,time.monotonic(),self.created):
@@ -146,8 +155,8 @@ class FastH264Encoder(H264Encoder):
                     if encoder=='libx264':codec.profile='Baseline'
                     level='6.0' if frame.width*frame.height*target_fps>3840*2160*60 else ('5.2' if frame.width*frame.height>1920*1080 else '4.2')
                     codec.options=({'usage':'ultralowlatency','quality':'speed','rc':'cbr','profile':'constrained_baseline','forced_idr':'1','async_depth':'1','enforce_hrd':'1','filler_data':'0'} if encoder=='h264_amf' else {'preset':'ultrafast','tune':'zerolatency','level':level,'x264-params':'bframes=0:rc-lookahead=0:sync-lookahead=0:scenecut=0'})
-                    codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic();self.applied_bitrate=self.target_bitrate;self.parameter_sets={}
-                    print(json.dumps({'encoder':encoder,'targetFps':target_fps,'sessionId':metadata.get('sessionId')}),flush=True);break
+                    codec.thread_count=4;codec.open();self.codec=codec;self.created=time.monotonic();self.applied_bitrate=self.target_bitrate;self.applied_profile=profile;self.parameter_sets={}
+                    print(json.dumps({'encoder':encoder,'targetFps':target_fps,'fixedProfile':self.fixed_profile,'bitrate':self.applied_bitrate,'sessionId':metadata.get('sessionId')}),flush=True);break
                 except Exception as error:
                     if encoder=='h264_amf':self.hardware_failed=True
                     print(json.dumps({'encoderFallback':encoder,'reason':str(error)}),flush=True)
@@ -198,14 +207,14 @@ class SharedFrameSource:
         while not self.closed:
             if not self.camera.is_capturing:time.sleep(.025);continue
             try:
-                started=time.perf_counter()
+                # DXcam already paces its producer and blocks this call until
+                # the next buffered frame. A second sleep drifts below 60Hz
+                # under normal Windows sleep overshoot, then skips frames.
                 image=self.camera.get_latest_frame()
                 if image is None:time.sleep(.01);continue
                 image.setflags(write=False)
                 with self.condition:
                     self.raw=image;self.captured_at=self.clock();self.generation+=1;self.grabs+=1;self.reader_error=None;self.condition.notify_all()
-                pause=1/self.refresh-(time.perf_counter()-started)
-                if pause>0:time.sleep(pause)
             except Exception as error:
                 with self.condition:self.reader_error=str(error);self.condition.notify_all()
                 time.sleep(.05)
@@ -263,7 +272,13 @@ class SharedFrameSource:
             self.camera.stop();self.raw=None;self.tick=None;self.converted.clear()
 
 class DesktopTrack(VideoStreamTrack):
-    def __init__(self,camera,width,height,fps,session_id=None,frame_source=None):super().__init__();self.camera=camera;self.width=width;self.height=height;self.fps=fps;self.session_id=session_id;self.delivery=DeliveryPolicy(fps);self.last_delivery=0;self.first=None;self.sent=0;self.frame_samples=deque(maxlen=1024);self.frame_source=frame_source or SharedFrameSource(camera,max(60,fps));self.owns_frame_source=frame_source is None;self.capture_pool=concurrent.futures.ThreadPoolExecutor(max_workers=1,thread_name_prefix='FrameRead')
+    frame_timeout=8
+    def __init__(self,camera,width,height,fps,session_id=None,frame_source=None,fixed_profile=False):
+        super().__init__();self.camera=camera;self.width=width;self.height=height;self.fps=fps;self.fixed_profile=bool(fixed_profile);self.session_id=session_id;self.delivery=DeliveryPolicy(fps,fixed=self.fixed_profile);self.last_delivery=0;self.first=None;self.sent=0;self.frame_samples=deque(maxlen=1024);self.frame_source=frame_source or SharedFrameSource(camera,max(60,fps));self.owns_frame_source=frame_source is None;self.capture_pool=concurrent.futures.ThreadPoolExecutor(max_workers=1,thread_name_prefix='FrameRead')
+        self.streaming=asyncio.Event();self.streaming.set()
+    def set_streaming(self,enabled):
+        if enabled:self.streaming.set()
+        else:self.streaming.clear()
     def delivery_diagnostics(self,now=None):
         now=time.perf_counter() if now is None else now
         samples=[sample for sample in list(self.frame_samples) if sample[0]>=now-5]
@@ -275,13 +290,18 @@ class DesktopTrack(VideoStreamTrack):
         now=time.perf_counter();self.first=self.first or now
         # Never share AVFrame metadata/pict_type across encoder threads.
         frame=av.VideoFrame.from_numpy_buffer(pixels,format='bgra' if pixels.ndim==3 else 'yuv420p')
-        frame.opaque={'fps':self.fps,'delivery':self.delivery,'sessionId':self.session_id,'preparedAt':now,'capturedAt':captured_at}
+        frame.opaque={'fps':self.fps,'fixedProfile':self.fixed_profile,'delivery':self.delivery,'sessionId':self.session_id,'preparedAt':now,'capturedAt':captured_at}
         frame.pts=round((now-self.first)*90000);frame.time_base=fractions.Fraction(1,90000)
         self.read_frames=getattr(self,'read_frames',0)+1
         self.read_total=getattr(self,'read_total',0)+read_time;self.convert_total=getattr(self,'convert_total',0)+convert_time
         if self.read_frames%300==0:print(json.dumps({'sessionId':self.session_id,'width':self.width,'height':self.height,'targetFps':self.fps,'sentFrames':self.sent,'sourceFps':round(self.sent/max(.01,now-self.first),1),'captureWaitMs':round(1000*self.read_total/self.read_frames,2),'convertMs':round(1000*self.convert_total/self.read_frames,2),'sharedGrabs':self.frame_source.grabs,'sharedConversions':self.frame_source.conversions,**self.delivery_diagnostics(now)}),flush=True)
         return frame
     async def recv(self):
+        if self.readyState!='live':raise MediaStreamError
+        # A video ICE transport may finish before control/audio do. Until the
+        # whole peer connects, do not allocate/convert/encode throwaway frames.
+        await self.streaming.wait()
+        if self.readyState!='live':raise MediaStreamError
         loop=asyncio.get_running_loop()
         if getattr(self,'prefetch',None) is None:self.prefetch=loop.run_in_executor(self.capture_pool,self.read_frame)
         interval=1/self.delivery.fps;deadline=self.last_delivery+interval;now=time.perf_counter()
@@ -291,10 +311,13 @@ class DesktopTrack(VideoStreamTrack):
         pause=deadline-now
         if pause>0:await asyncio.sleep(pause)
         self.last_delivery=deadline
-        frame=await self.prefetch
+        try:frame=await asyncio.wait_for(asyncio.shield(self.prefetch),self.frame_timeout)
+        except asyncio.TimeoutError:raise RuntimeError('Desktop frame preparation stalled; reconnecting.') from None
         prepared=getattr(frame,'opaque',None)
         if isinstance(prepared,dict) and (frame.width!=self.width or frame.height!=self.height or time.perf_counter()-prepared.get('capturedAt',prepared.get('preparedAt',time.perf_counter()))>min(.05,2/self.fps)):
-            frame=await loop.run_in_executor(self.capture_pool,self.read_frame)
+            self.prefetch=loop.run_in_executor(self.capture_pool,self.read_frame)
+            try:frame=await asyncio.wait_for(asyncio.shield(self.prefetch),self.frame_timeout)
+            except asyncio.TimeoutError:raise RuntimeError('Desktop frame refresh stalled; reconnecting.') from None
         self.sent+=1;self.frame_samples.append((time.perf_counter(),self.sent))
         # A single prepared frame overlaps conversion with the previous
         # frame's AMF encoder. Never accumulate a queue under CPU load.
@@ -302,6 +325,7 @@ class DesktopTrack(VideoStreamTrack):
         return frame
     def stop(self):
         super().stop()
+        self.streaming.set() # Wake a paused recv so teardown cannot hang.
         pending=getattr(self,'prefetch',None)
         if pending:
             pending.cancel()
@@ -381,7 +405,7 @@ class DesktopSession:
         now=time.monotonic() if now is None else now
         report=event.get('receiverReport')
         if not isinstance(report,dict):return
-        fields=['fps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoKeyFramesDelta','videoPliDelta','videoNackDelta','videoFreezeDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
+        fields=['fps','receivedFps','presentedFps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoReceivedDelta','videoPresentedDelta','videoPresentationSource','videoPresentationAgeMs','viewerVisible','videoPaused','videoKeyFramesDelta','videoPliDelta','videoNackDelta','videoFreezeDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
         values={key:value for key in fields if isinstance(value:=report.get(key),(int,float)) and not isinstance(value,bool) and math.isfinite(value)}
         if getattr(self,'track',None):self.track.delivery.receiver_feedback(values,now=now)
         if now-self.last_report_log<5:return
@@ -396,9 +420,24 @@ class DesktopSession:
         if state in ['closed','failed']:return True
         # A healthy transport must not be destroyed just because a mobile
         # timer or a busy event loop delayed the optional viewer heartbeat.
-        if state=='connected':return False
+        if state=='connected':return self.media_failure() is not None
         if state=='disconnected':return now-self.last_activity>90
         return now-self.created_at>35
+    def media_failure(self,now=None):
+        """A live data channel cannot keep a dead video sender alive forever."""
+        if self.closed or not self.pc or self.pc.connectionState!='connected':
+            self.media_progress=None;return None
+        track=getattr(self,'track',None);sender=getattr(self,'video_sender',None)
+        if track is None or sender is None:return None
+        task=getattr(sender,'_RTCRtpSender__rtp_task',None)
+        if task is not None and task.done():return 'video-sender-ended'
+        if track.readyState=='ended':return 'video-track-ended'
+        now=time.perf_counter() if now is None else now
+        progress=(track.sent,getattr(sender,'_RTCRtpSender__packet_count',None))
+        previous=getattr(self,'media_progress',None)
+        if previous is None or progress!=previous[0]:self.media_progress=(progress,now)
+        elif now-previous[1]>=8:return 'video-sender-stalled'
+        return None
     async def answer(self,offer):
         self.owner.audio_router.start()
         offered=sdp.SessionDescription.parse(offer['sdp'])
@@ -408,7 +447,8 @@ class DesktopSession:
         width,height=stream_dimensions(self.source_width,self.source_height,preferences.get('quality','480'))
         if not self.camera.is_capturing:self.camera.start(target_fps=min(120,self.refresh),video_mode=True)
         self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=getattr(self.owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])))
-        self.track=track=DesktopTrack(self.camera,width,height,fps,self.session_id,frame_source=self.owner.frame_source)
+        self.track=track=DesktopTrack(self.camera,width,height,fps,self.session_id,frame_source=self.owner.frame_source,fixed_profile=preferences.get('fixedProfile') is True)
+        track.set_streaming(False)
         cnames={'video':self.session_id+'-video','audio':self.session_id+'-audio'}
         self.video_sender=pc.addTrack(track);independent_media_sender(self.video_sender,cnames['video']);self.last_keyframe_request=0
         print(json.dumps({'sessionId':self.session_id,'streamStarted':True,'width':width,'height':height,'targetFps':fps}),flush=True)
@@ -452,7 +492,7 @@ class DesktopSession:
                         channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
                     elif event.get('type')=='settings':
                         track.width,track.height=stream_dimensions(self.source_width,self.source_height,event.get('quality','480'))
-                        track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.delivery=DeliveryPolicy(track.fps)
+                        track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.fixed_profile=event.get('fixedProfile',track.fixed_profile) is True;track.delivery=DeliveryPolicy(track.fps,fixed=track.fixed_profile)
                     elif event.get('type')=='display' and event.get('mode') in ['original','virtual']:
                         if event['mode']=='virtual' and not any(d['virtual'] and d['attached'] for d in displays()):raise RuntimeError('Virtual display not ready')
                         async def change_display():
@@ -494,12 +534,17 @@ class DesktopSession:
             if pc.sctp:
                 for pair in pc.sctp.transport.transport._connection._nominated.values():pairs.append({'local':pair.local_candidate.type,'remote':pair.remote_candidate.type})
             print(json.dumps({'sessionId':self.session_id,'connection':pc.connectionState,'ageSeconds':round(time.monotonic()-self.created_at,1),'candidatePairs':pairs}),flush=True)
+            if self.track is not None:self.track.set_streaming(pc.connectionState=='connected')
             if pc.connectionState=='connected':self.last_activity=time.monotonic()
             self.owner.update_input_state()
             if pc.connectionState in ['failed','closed']:asyncio.create_task(self.close('transport-'+pc.connectionState))
         async def expire_idle():
             while not self.closed:
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
+                failure=self.media_failure()
+                if failure:
+                    print(json.dumps({'sessionId':self.session_id,'mediaFailure':failure}),flush=True)
+                    await self.close(failure);return
                 if self.expired():
                     print(json.dumps({'sessionId':self.session_id,'expired':True,'connection':pc.connectionState}),flush=True)
                     await self.close()
@@ -670,5 +715,6 @@ if __name__=='__main__':
         if not instance_mutex:raise OSError(ctypes.get_last_error(),'Could not initialize the desktop-agent instance lock.')
         if ctypes.get_last_error()==183:
             print('This desktop agent is already running. Duplicate startup was prevented.',flush=True);sys.exit(0)
-    try:asyncio.run(main())
+    from realtime_clock import run_realtime
+    try:run_realtime(main())
     except KeyboardInterrupt:pass

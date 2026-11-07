@@ -43,5 +43,9 @@ async def main():
     sender._RTCRtpSender__rtt=.6
     await dtls._send_rtp(bytes([128,102]))
     assert remote['pacingBitsPerSecond']==385000,'A brief recovery must not immediately refill the queue'
+    sender._RTCRtpSender__encoder.fixed_profile=True
+    sender._RTCRtpSender__encoder.profile_bitrate=8000000
+    await dtls._send_rtp(bytes([128,102]))
+    assert remote['pacingBitsPerSecond']==9200000,'Fixed 1080P must retain its selected bitrate plus packet overhead despite noisy REMB'
     print('Verified bounded video queue, audio progress, merged video payload types and prompt close. No network traffic.')
 asyncio.run(main())

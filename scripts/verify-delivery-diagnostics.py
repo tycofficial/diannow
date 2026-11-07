@@ -18,5 +18,9 @@ try:
     report=json.loads(output.getvalue())
     assert report['deliveryFps']==60 and report['estimatedMbps']==4.0 and report['avgFrameKB']==20.0 and report['actualFps']==20.0
     assert report['receiverReport']=={'fps':19.8,'bufferMs':34}
+    report_values={'fps':60,'receivedFps':60,'presentedFps':15,'videoReceivedDelta':60,'videoPresentedDelta':15,'videoPresentationSource':1,'videoPresentationAgeMs':120,'viewerVisible':1,'videoPaused':0}
+    output=io.StringIO()
+    with contextlib.redirect_stdout(output):session.report_receiver({'receiverReport':report_values},now=20)
+    assert json.loads(output.getvalue())['receiverReport']==report_values,'Decoded, received and actually presented frames must remain distinguishable in logs'
     print('Delivery diagnostics verified: recent actual fps, REMB estimate, frame size and pacing cap. No desktop or network IO.')
 finally:track.stop()

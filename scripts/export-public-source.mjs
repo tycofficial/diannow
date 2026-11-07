@@ -6,6 +6,7 @@ const runtimePaths=['index.html','.nojekyll','README.md','THIRD_PARTY.md','requi
 runtimePaths.push('scripts/control_transport.py');
 runtimePaths.push('scripts/bitrate_stability.py');
 runtimePaths.push('scripts/stream_profile.py');
+runtimePaths.push('scripts/realtime_clock.py');
 const checks=(await readdir('scripts',{withFileTypes:true})).filter(entry=>entry.isFile()&&/^verify-[a-z0-9-]+\.(?:py|mjs)$/.test(entry.name)).map(entry=>'scripts/'+entry.name).sort();
 const paths=[...runtimePaths,'scripts/desktop_host.py','scripts/build-desktop.ps1','scripts/install-desktop.ps1',...checks];
 const files=await Promise.all(paths.map(async path=>({path,mode:'100644',type:'blob',content:await readFile(path,'utf8')})));

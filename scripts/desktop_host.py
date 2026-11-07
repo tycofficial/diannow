@@ -199,7 +199,8 @@ def run_engine():
     config=load_configuration();sys.stdin=io.StringIO(json.dumps(config)+'\n')
     import asyncio
     import rtc_agent
-    asyncio.run(rtc_agent.main())
+    from realtime_clock import run_realtime
+    run_realtime(rtc_agent.main())
 
 def self_test(destination):
     result={'frozen':bool(getattr(sys,'frozen',False)),'configurationReadable':False}

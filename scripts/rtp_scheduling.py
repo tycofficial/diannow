@@ -8,6 +8,21 @@ import asyncio
 import time
 
 
+class PacketPacer:
+    """Preserve the send timeline across timer overshoot, with bounded bursts."""
+    def __init__(self,clock=time.perf_counter,sleep=asyncio.sleep,burst_seconds=.004):
+        self.clock=clock;self.sleep=sleep;self.burst_seconds=burst_seconds;self.next_at=None
+    async def wait(self,byte_count,bits_per_second):
+        if bits_per_second<=0:raise ValueError('A positive packet rate is required')
+        now=self.clock()
+        deadline=now if self.next_at is None else max(self.next_at,now-self.burst_seconds)
+        if deadline>now:await self.sleep(deadline-now)
+        # A late wake may spend up to four milliseconds of accumulated credit.
+        # Starting a new interval at every actual wake would compound Windows
+        # timer overshoot on every RTP packet and throttle even an idle link.
+        self.next_at=max(deadline,self.clock()-self.burst_seconds)+8*byte_count/bits_per_second
+
+
 def install_cooperative_rtp_send(transport,packet_limit=16,burst_seconds=.002,*,clock=None,yield_now=None):
     """Wrap this DTLS transport once and return its mutable diagnostics.
 

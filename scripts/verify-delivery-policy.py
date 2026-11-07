@@ -33,4 +33,6 @@ for second in range(1,30):legacy.observe(64000,now=second)
 assert legacy.fps==60,'Old clients start at target; an unverified estimate is not congestion.'
 for malformed in [{'bufferMs':None},{'bufferMs':float('inf')},{'bufferMs':True}]:legacy.receiver_feedback(malformed,now=40)
 assert legacy.fps==60
+for second in range(50,100,5):legacy.receiver_feedback({'viewerVisible':0,'lossDelta':20,'bufferMs':1000},now=second)
+assert legacy.fps==60 and legacy.last_buffer is None,'Hidden page decoder throttling must not reduce active transport FPS'
 print('Replayed old 350kbps/32KB false cap: 5fps -> healthy 60fps. Confirmed congestion reduces gradually to 20fps and recovers; no media/network IO.')
