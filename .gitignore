@@ -2,6 +2,7 @@ dist/
 build/
 site.tar.gz
 outputs/
+work/
 agent-state.json
 .venv/
 __pycache__/

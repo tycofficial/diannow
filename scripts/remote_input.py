@@ -82,18 +82,54 @@ def key(vk,up=False):
     return INPUT(type=1,ki=KEYBDINPUT(wVk=0,wScan=scan&0xff,dwFlags=8|(2 if up else 0)|(1 if extended else 0)))
 def mouse(flags,data=0,x=0,y=0): return INPUT(type=0,mi=MOUSEINPUT(dx=x,dy=y,mouseData=data & 0xffffffff,dwFlags=flags))
 
+class MotionInputQueue(queue.Queue):
+    """Replace unsent motion while preserving every key/contact boundary."""
+    @staticmethod
+    def motion_key(item):
+        event=item[0]
+        if event.get('id'):return None
+        kind=event.get('type')
+        if kind=='move' or kind=='relative' and 'totalX' in event and 'totalY' in event:
+            return (event.get('_owner','legacy'),kind,event.get('_inputEpoch'),event.get('_ownerEpoch'))
+        if kind=='touch' and event.get('phase')=='move':
+            return (event.get('_owner','legacy'),kind,event.get('gesture'),event.get('_inputEpoch'),event.get('_ownerEpoch'))
+        return None
+    def put_latest(self,item):
+        with self.not_full:
+            motion=self.motion_key(item)
+            if motion is not None and self.queue and self.motion_key(self.queue[-1])==motion:
+                previous=self.queue[-1][0];sequence='touchSeq' if item[0].get('type')=='touch' else 'seq'
+                if item[0].get(sequence,0)<previous.get(sequence,0):return
+                self.queue[-1]=item;return
+            if self.maxsize>0 and self._qsize()>=self.maxsize:raise queue.Full
+            self._put(item);self.unfinished_tasks+=1;self.not_empty.notify()
+
 class RemoteInput:
     def __init__(self):
         self.touch=NativeTouch()
         self.native_touch=True;self.touch_error=None;self.compat_touch=None
         self.owners={};self.touch_owner=None;self.state_lock=threading.RLock()
         self.bounds=None
-        self.events=queue.Queue(maxsize=512);self.buttons=set();self.pressed=set();self.running=True;self.error=None;self.enabled=False;self.on_result=None;self.move_sequence=0
+        self.events=MotionInputQueue(maxsize=512);self.buttons=set();self.pressed=set();self.running=True;self.error=None;self.enabled=False;self.on_result=None;self.input_epoch=0;self.owner_epochs={}
         self.thread=threading.Thread(target=self.run,name='RemoteInput',daemon=True);self.thread.start()
     def submit(self,event,on_result=None):
         if not self.enabled or not isinstance(event,dict):return
-        try:self.events.put_nowait((event,on_result or self.on_result))
-        except queue.Full:self.release_all()
+        callback=on_result or self.on_result;discarded=[]
+        with self.state_lock:
+            if not self.enabled:return
+            owner=event.get('_owner','legacy')
+            event={**event,'_inputEpoch':self.input_epoch,'_ownerEpoch':self.owner_epochs.get(owner,0)}
+            try:self.events.put_latest((event,callback))
+            except queue.Full:
+                # Releasing alone is unsafe: old DOWNs in the FIFO would press
+                # the same buttons again after the reset.
+                self.input_epoch+=1
+                while True:
+                    try:discarded.append(self.events.get_nowait())
+                    except queue.Empty:break
+                discarded.append((event,callback));self._release_all()
+        for dropped,reply in discarded:
+            if reply and dropped.get('id'):reply(dropped['id'],'Input queue overflow; controls were released. Please repeat the action.')
     def release_all(self):
         with self.state_lock:self._release_all()
     def _release_all(self):
@@ -106,6 +142,7 @@ class RemoteInput:
         self.pressed.clear()
     def release_owner(self,owner,forget=True):
         with self.state_lock:
+            if forget:self.owner_epochs[owner]=self.owner_epochs.get(owner,0)+1
             if self.touch_owner==owner:self._release_touch();self.touch_owner=None
             state=self.owners.pop(owner,None)
             if not state:return
@@ -117,17 +154,21 @@ class RemoteInput:
                 state['keys'].clear();state['buttons'].clear();state['touchGesture']=None
                 self.owners[owner]=state
     def disable(self):
-        self.enabled=False;self.move_sequence=0;self.error=None
-        while True:
-            try:self.events.get_nowait()
-            except queue.Empty:break
-        self.release_all()
+        with self.state_lock:
+            self.enabled=False;self.input_epoch+=1;self.error=None
+            while True:
+                try:self.events.get_nowait()
+                except queue.Empty:break
+            self._release_all()
     def run(self):
         while self.running:
             event,on_result=self.events.get()
             try:
-                if not self.enabled:raise OSError('The desktop input channel is not connected.')
-                self.apply(event)
+                with self.state_lock:
+                    if not self.enabled:raise OSError('The desktop input channel is not connected.')
+                    if event.get('_inputEpoch',self.input_epoch)!=self.input_epoch or event.get('_ownerEpoch',self.owner_epochs.get(event.get('_owner','legacy'),0))!=self.owner_epochs.get(event.get('_owner','legacy'),0):
+                        raise OSError('The input session was released before this action was applied.')
+                    self.apply(event)
                 # Pointer movement and an empty release do not prove that the
                 # user's failed click or key reached its target program.
                 if event.get('type') in ['button','wheel','key','text','touch','keyState']:self.error=None
@@ -148,6 +189,10 @@ class RemoteInput:
     def apply(self,event):
         with self.state_lock:self._apply(event)
     def _touch_failed(self,error):
+        # A failed UPDATE can leave the injected Windows contact held. Cancel
+        # it before falling back to mouse input, while its state is available.
+        try:self.touch.release(True)
+        except OSError:pass
         self.native_touch=False;self.touch_error=str(error);self.touch.active=False
         print(json.dumps({'touchFallback':True,'winerror':getattr(error,'winerror',None),'error':str(error)}),flush=True)
     def _release_touch(self):
@@ -252,16 +297,21 @@ class RemoteInput:
                 state['keys'].discard(vk)
                 if not any(vk in value['keys'] for value in self.owners.values()):emit([key(vk,True)]);self.pressed.discard(vk)
         elif kind=='move':
-            sequence=event.get('seq',0)
-            if sequence and sequence<self.move_sequence:return
-            if sequence:self.move_sequence=sequence
+            sequence=int(event.get('seq',0))
+            if sequence and sequence<=state.get('moveSeq',0):return
+            if sequence:state['moveSeq']=sequence
             x=max(0,min(1,float(event.get('x',0))));y=max(0,min(1,float(event.get('y',0))))
             if self.bounds:
                 left,top,width,height=self.bounds;vx=user32.GetSystemMetrics(76);vy=user32.GetSystemMetrics(77);vw=user32.GetSystemMetrics(78);vh=user32.GetSystemMetrics(79)
                 x=(left+x*(width-1)-vx)/max(1,vw-1);y=(top+y*(height-1)-vy)/max(1,vh-1)
             emit([mouse(0x8001|(0x4000 if self.bounds else 0),x=round(x*65535),y=round(y*65535))])
         elif kind=='button':
-            if 'x' in event and 'y' in event:self.apply({'type':'move','x':event['x'],'y':event['y']})
+            if 'x' in event and 'y' in event:
+                # Unreliable motion may overtake reliable DOWN/UP. A button
+                # must act at its own coordinates even in that ordering, while
+                # keeping the highest motion fence for later stale packets.
+                state['moveSeq']=max(state.get('moveSeq',0),int(event.get('seq',0)))
+                self.apply({'type':'move','x':event['x'],'y':event['y'],'_owner':owner})
             button=int(event.get('button',0));down=bool(event.get('down'))
             if button not in [0,1,2]:return
             if down:
@@ -273,7 +323,7 @@ class RemoteInput:
                 if not any(button in value['buttons'] for value in self.owners.values()):emit([mouse({0:4,1:64,2:16}[button])]);self.buttons.discard(button)
         elif kind=='wheel':
             if 'x' in event and 'y' in event:
-                self.apply({'type':'move','x':event['x'],'y':event['y']})
+                self.apply({'type':'move','x':event['x'],'y':event['y'],'_owner':owner})
                 point=POINT();user32.GetCursorPos(ctypes.byref(point));target=user32.WindowFromPoint(point)
                 if target:user32.SetForegroundWindow(user32.GetAncestor(target,2) or target)
             value=max(-1200,min(1200,int(event.get('delta',0))))

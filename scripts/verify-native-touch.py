@@ -13,4 +13,27 @@ touch.apply({'phase':'down','x':.3,'y':.3});touch.release(True)
 assert events[-1][0]==0x48000 and not touch.active
 events.clear();touch.apply({'phase':'down','x':.3,'y':.3});touch.apply({'phase':'up','x':.3,'y':.3})
 assert [flags for flags,_ in events]==[0x10006,0x20006,0x40000],'A stationary tap must UPDATE before UP to avoid WinError 87'
+
+# A transient API failure on a stationary contact must still attempt UP.
+events.clear();touch.active=True;touch.updated=False
+def rejected_update(flags,pos):
+    events.append((flags,pos))
+    if flags==0x20006:raise OSError(87,'Rejected UPDATE')
+touch.inject=rejected_update
+touch.release(True)
+assert [flags for flags,_ in events]==[0x20006,0x48000] and not touch.active
+
+events.clear();touch.active=True;touch.updated=False
+touch.release()
+assert [flags for flags,_ in events]==[0x20006,0x40000] and not touch.active,'A successful UP must not trigger a duplicate mouse fallback for a rejected UPDATE'
+
+events.clear();touch.active=True;touch.updated=True
+def rejected_up(flags,pos):
+    events.append((flags,pos))
+    if flags==0x40000:raise OSError(87,'Rejected UP')
+touch.inject=rejected_up
+try:touch.release()
+except OSError:pass
+else:raise AssertionError('A failed UP must be reported after cancelling its contact')
+assert [flags for flags,_ in events]==[0x40000,0x48000] and not touch.active
 print('Native touch ABI, final-position update, UP coordinate invariants and cancellation passed without desktop input.')

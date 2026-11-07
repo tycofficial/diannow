@@ -11,4 +11,8 @@ events.length=0;gestures.down(e(20,20));gestures.down(e(80,20,2));gestures.move(
 events.length=0;mode='drag';gestures.down(e(20,20));assert.equal(events[0].down,true);gestures.move(e(70,80));gestures.cancel();assert.equal(events.at(-1).down,false);
 events.length=0;mode='scroll';gestures.down(e(20,20));gestures.move(e(20,70));gestures.up(e(20,70));assert(events.some(e=>e.type==='wheel'));assert(!events.some(e=>e.type==='button'));
 events.length=0;mode='native';gestures.down(e(20,20));gestures.cancel();gestures.up(e(20,20));assert.equal(events.at(-1).phase,'cancel');
+events.length=0;mode='scroll';gestures.down(e(20,20));gestures.up(e(20,70));assert(events.some(e=>e.type==='wheel'),'Pointerup must consume the final position when no last pointermove arrived');assert(!events.some(e=>e.type==='button'));
+events.length=0;mode='native';gestures.down(e(20,20));gestures.down(e(20,20));gestures.up(e(20,20));assert.deepEqual(events.map(e=>e.phase),['down','up'],'Duplicate pointerdown must not start a second unreleased contact');
+events.length=0;gestures.down(e(20,20));gestures.move(e(40,20));gestures.down(e(80,20,2));gestures.up(e(40,20));gestures.up(e(80,20,2));assert(!events.some(e=>e.type==='button'),'Adding a second finger after a drag must not turn that drag into a right click');
+events.length=0;gestures.down(e(20,20));gestures.down(e(80,20,2));gestures.move(e(20,60));gestures.up(e(80,20,2));gestures.move(e(20,200));gestures.down(e(80,200,2));events.length=0;gestures.move(e(20,202));assert(events.every(e=>e.type!=='wheel'||Math.abs(e.delta)<=6),'Rejoining fingers must reset the scroll anchor');gestures.cancel();
 console.log('Immediate native touch, direct drag, scroll, two-finger midpoint right click, scroll suppression and cancellation passed.');

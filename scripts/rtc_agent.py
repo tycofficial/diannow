@@ -474,9 +474,10 @@ class DesktopSession:
                         self.audio_sender._enabled=bool(event.get('enabled'))
                         if getattr(self,'turn_flow',None):self.turn_flow['audioEnabled']=self.audio_sender._enabled
                     else:
-                        if event.get('type')=='move' and event.get('seq'):
-                            if event['seq']<=self.move_sequence:return
-                            self.move_sequence=event.pop('seq')
+                        if event.get('type') in ['move','button'] and event.get('seq'):
+                            sequence=int(event['seq'])
+                            if event['type']=='move' and sequence<=self.move_sequence:return
+                            self.move_sequence=max(self.move_sequence,sequence)
                         event['_owner']=self.session_id
                         self.input.submit(event,input_result)
                 except Exception as error:

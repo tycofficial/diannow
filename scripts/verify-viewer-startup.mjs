@@ -7,12 +7,12 @@ const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>mat
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
 async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12){
-  const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[];let timerId=0,clockNow=Date.now();
+  const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[],animationFrames=[],documentListeners={};let timerId=0,clockNow=Date.now();
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
     const listeners={};
     nodes[id]={style:{},children:[],textContent:'',value:id==='quality'?'auto':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
-      classList:{toggle(){open=!open;return open}},setAttribute(){},appendChild(child){this.children.push(child)},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
+      classList:{toggle(){open=!open;return open}},attributes:{},setAttribute(name,value){this.attributes[name]=String(value)},appendChild(child){this.children.push(child)},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){this.focusCalls=(this.focusCalls||0)+1},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
   }
   class Peer{
     iceGatheringState='complete';connectionState='new';
@@ -33,8 +33,9 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   function setTimer(callback,delay){if(wrongReceiver(this))throw new TypeError('Can only call Window.setTimeout on instances of Window');timers.set(++timerId,{callback,delay});return timerId}
   function clearTimer(id){if(wrongReceiver(this))throw new TypeError('Can only call Window.clearTimeout on instances of Window');timers.delete(id)}
   const navigator={audioSession:{type:'auto'}};
-  const context=vm.createContext({window,navigator,document:{getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(){}},
-    location:{hostname:'screen.example',href:'https://screen.example/',replace(value){navigations.push(value)}},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(){},performance:{now:()=>clockNow},
+  const document={hidden:false,getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(type,listener){(documentListeners[type]??=[]).push(listener)}};
+  const context=vm.createContext({window,navigator,document,
+    location:{hostname:'screen.example',href:'https://screen.example/',replace(value){navigations.push(value)}},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(callback){animationFrames.push(callback)},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},URL,AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
     fetch:async(path,options)=>{if(path.endsWith('/api/version'))return {ok:true,json:async()=>({build:serverBuild})};if(path.endsWith('/api/ice'))return {ok:true,json:async()=>({iceServers:[{urls:'turn:relay.example:3478?transport=tcp',username:'test',credential:'test'}],relayAvailable:true})};requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
@@ -51,7 +52,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   }
   async function fireTimer(delay){const entry=[...timers].find(([,timer])=>timer.delay===delay);assert(entry,'Expected a '+delay+' ms timer');timers.delete(entry[0]);entry[1].callback();await flush()}
   function dispatch(id,type,properties={}){const event={prevented:false,preventDefault(){this.prevented=true},...properties};for(const listener of nodes[id].listeners[type]||[])listener(event);return event}
-  return {nodes,stages,requests,peers,timers,navigations,setServerBuild(value){serverBuild=value},fireTimer,channels,sent,dispatch,intervals,navigator,dispatchWindow(type,event){for(const listener of windowListeners[type]||[])listener(event)},advanceTime:ms=>clockNow+=ms};
+  return {nodes,stages,requests,peers,timers,navigations,setServerBuild(value){serverBuild=value},fireTimer,channels,sent,dispatch,intervals,navigator,document,dispatchDocument(type,event){for(const listener of documentListeners[type]||[])listener(event)},stepFrame(){for(const callback of animationFrames.splice(0))callback()},dispatchWindow(type,event){for(const listener of windowListeners[type]||[])listener(event)},advanceTime:ms=>clockNow+=ms};
 }
 const connected=await start(true);
 assert(connected.stages.includes('connected'));
@@ -321,5 +322,67 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(15);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=15/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(16);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=16/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+}
+
+const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,clientY:100,button:0,preventDefault(){},...overrides});
+{
+ const viewer=await start(true),control=viewer.channels[0],screen=viewer.nodes.screen;
+ const before=viewer.sent.length;
+ control.bufferedAmount=65536;
+ screen.onpointerdown(pointer());screen.onpointerup(pointer());
+ assert.equal(viewer.sent.length,before,'Congested critical boundaries wait rather than disappear');
+ control.bufferedAmount=0;control.onbufferedamountlow();
+ assert.deepEqual(viewer.sent.slice(before).map(e=>e.phase),['down','up'],'Native touch down/up drain in order');
+ assert(viewer.sent.slice(before).every(e=>e.gesture>0&&e.touchSeq>0));
+ control.bufferedAmount=65536;screen.onpointerdown(pointer({pointerId:78}));screen.onpointerup(pointer({pointerId:78}));
+ viewer.advanceTime(2100);control.bufferedAmount=0;control.onbufferedamountlow();
+ assert.equal(viewer.sent.at(-1).type,'release','Expired actions release instead of replaying old taps');
+ assert(!viewer.nodes.hardwareInput.focusCalls,'Touch gestures must not summon the hidden software keyboard');
+}
+{
+ const viewer=await start(true),screen=viewer.nodes.screen;
+ screen.setPointerCapture=()=>{throw new Error('Pointer is no longer active')};
+ const before=viewer.sent.length;screen.onpointerdown(pointer());
+ viewer.dispatchWindow('pointerup',pointer({target:{tagName:'BODY'}}));
+ assert.deepEqual(viewer.sent.slice(before).filter(e=>e.type==='touch').map(e=>e.phase),['down','up'],'A capture failure still receives release outside the player');
+ screen.onpointerdown(pointer());screen.onlostpointercapture(pointer());
+ assert.equal(viewer.sent.at(-1).type,'release');
+ viewer.stepFrame();assert.equal(viewer.sent.at(-1).type,'release','Capture loss discards pending movement');
+}
+{
+ const viewer=await start(true),screen=viewer.nodes.screen,mouse=pointer({pointerType:'mouse'});
+ screen.onpointerdown(mouse);screen.onpointermove({...mouse,clientX:200});screen.onpointerup({...mouse,clientX:300});
+ const up=viewer.sent.at(-1);assert.equal(up.type,'button');assert.equal(up.down,false);
+ assert(up.seq>viewer.sent.at(-2).seq,'Mouse release advances the movement ordering barrier');
+ const before=viewer.sent.length;viewer.stepFrame();assert.equal(viewer.sent.length,before,'An unsent mouse movement cannot jump back after mouseup');
+}
+{
+ const viewer=await start(true),buttons=viewer.nodes.oskRows.children.flatMap(row=>row.children),button=buttons.find(b=>b.textContent==='A');
+ button.onpointerdown(pointer());assert([...viewer.timers.values()].some(t=>t.delay===400));
+ viewer.dispatchWindow('blur',{});
+ assert(![...viewer.timers.values()].some(t=>t.delay===400),'Blur cancels the pending repeat timer');
+ const before=viewer.sent.length;for(const tick of viewer.intervals.slice(2))tick();
+ assert.equal(viewer.sent.length,before,'Released keyboard keys cannot start repeating again');
+}
+console.log('Verified congested touch boundaries, stale-input expiry, lost pointer capture, final mouse position and keyboard repeat cleanup.');
+
+{
+ const viewer=await start(true),event={key:'Shift',code:'ShiftLeft',preventDefault(){},target:{tagName:'BODY'}};
+ viewer.dispatchWindow('keydown',event);
+ viewer.dispatchWindow('keyup',{...event,isComposing:true,target:{tagName:'SELECT'}});
+ assert.equal(viewer.sent.at(-1).code,'ShiftLeft');assert.equal(viewer.sent.at(-1).down,false,'A key held before focus changes must still be released in a local control');
+ const before=viewer.sent.length;
+ viewer.dispatchWindow('keydown',{...event,code:'KeyW',target:{tagName:'TEXTAREA'}});
+ viewer.dispatchWindow('keyup',{...event,code:'KeyW',target:{tagName:'TEXTAREA'}});
+ assert.equal(viewer.sent.length,before,'Typing in local fields remains local');
+ console.log('Verified held hardware keys release across focus and composition changes.');
+}
+{
+ const viewer=await start(true);viewer.channels[0].bufferedAmount=65536;
+ viewer.nodes.typing.value='保留未发送的文字';viewer.dispatch('typing','input');
+ assert.equal(viewer.nodes.typing.value,'保留未发送的文字');assert.equal(viewer.nodes.typingMode.value,'draft');
+ viewer.channels[0].bufferedAmount=0;viewer.nodes.sendTyping.onclick();
+ assert.equal(viewer.sent.at(-1).text,'保留未发送的文字');
+ console.log('Verified failed live text is retained as a sendable draft.');
 }

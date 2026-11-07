@@ -19,7 +19,8 @@ $configuration=Join-Path $stateDir 'connection.dpapi'
 $desktopExe=Join-Path ([Environment]::GetFolderPath('Desktop')) '远程桌面.exe'
 $report=Join-Path $stateDir 'installation-result.json'
 try{
- if(-not(Test-Path -LiteralPath $sourceExe) -or -not(Test-Path -LiteralPath (Join-Path $sourceHost 'RemoteDesktop.exe')) -or -not(Test-Path -LiteralPath $configuration)){throw 'Build or connection configuration missing.'}
+ $needsLauncher=-not $RuntimeOnly -or -not(Test-Path -LiteralPath $desktopExe)
+ if(($needsLauncher -and -not(Test-Path -LiteralPath $sourceExe)) -or -not(Test-Path -LiteralPath (Join-Path $sourceHost 'RemoteDesktop.exe')) -or -not(Test-Path -LiteralPath $configuration)){throw 'Build or connection configuration missing.'}
  if(-not $RuntimeOnly){ & (Join-Path $PSScriptRoot 'install-signed-drivers.ps1') }
  $driverCode=0
  $backupDir=Join-Path $appDir ('backups\'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -57,7 +58,7 @@ try{
   Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object {if($_.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Unexpected reparse point in protected installation.'};Protect-Path $_.FullName}
   Protect-Path $root
  }
- if(-not $RuntimeOnly -or -not(Test-Path -LiteralPath $desktopExe)){Copy-Item -LiteralPath $sourceExe -Destination $desktopExe -Force}
+ if($needsLauncher){Copy-Item -LiteralPath $sourceExe -Destination $desktopExe -Force}
  $identity=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
  $escapedExe=[Security.SecurityElement]::Escape($installedExe)
  $escapedDir=[Security.SecurityElement]::Escape($installDir)

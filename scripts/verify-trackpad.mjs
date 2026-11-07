@@ -6,4 +6,7 @@ events.length=0;pad.down(e(20,20));pad.up(e(20,20));assert.deepEqual(events.map(
 events.length=0;pad.down(e(20,20));pad.down(e(40,20,2));pad.up(e(20,20));pad.up(e(40,20,2));assert(events.every(e=>e.button===2));
 events.length=0;pad.down(e(20,20));pad.down(e(40,20,2));pad.move(e(40,70,2));pad.up(e(20,20));pad.up(e(40,70,2));assert(events.some(e=>e.type==='wheel'));assert(!events.some(e=>e.type==='button'));
 events.length=0;assert(pad.toggleDrag());pad.down(e(20,20));pad.move(e(50,60));pad.cancel();assert.equal(events[0].down,true);assert.equal(events.at(-1).down,false);
+events.length=0;assert(pad.toggleDrag());pad.down(e(20,20));pad.up(e(20,20));assert.deepEqual(events.map(e=>[e.button,e.down]),[[0,true]],'A tap during drag lock must not release the held button');assert(pad.dragging);assert.equal(pad.toggleDrag(),false);assert.equal(events.at(-1).down,false);
+events.length=0;pad.down(e(20,20));pad.up(e(60,80));assert.deepEqual(events,[{type:'relative',dx:80,dy:120}],'The final pointerup position must move the cursor without generating a click');
+events.length=0;pad.down(e(20,20));pad.down(e(20,20));pad.move(e(30,20));pad.up(e(30,20));assert.deepEqual(events,[{type:'relative',dx:20,dy:0}],'Duplicate pointerdown must not reset the movement origin');
 console.log('Trackpad relative motion, click, two-finger right click/scroll, speed, drag lock and feedback passed.');

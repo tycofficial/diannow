@@ -23,4 +23,39 @@ touch('down',1,2);touch('move',10,1);touch('up',2,2)
 assert [event['gesture'] for event in touches]==[1,1,1,2,2]
 remote.release_owner('phone');touch('move',100,2)
 assert len(touches)==5 and not remote.touch_owner
+
+# A reliable button boundary must fence older motion on the unreliable channel.
+captured.clear()
+remote.apply({'type':'move','x':.2,'y':.3,'seq':1,'_owner':'phone'})
+remote.apply({'type':'button','button':0,'down':False,'x':.8,'y':.6,'seq':3,'_owner':'phone'})
+before=len(captured)
+remote.apply({'type':'move','x':.4,'y':.4,'seq':2,'_owner':'phone'})
+assert len(captured)==before,'Late pre-release movement must not reposition the pointer'
+remote.apply({'type':'move','x':.1,'y':.1,'seq':1,'_owner':'ipad'})
+assert len(captured)==before+1,'A second viewer has an independent sequence counter'
+assert 'legacy' not in remote.owners,'Button coordinates must retain their owning viewer'
+
+# Fast motion can overtake a reliable DOWN; the click still belongs at DOWN's
+# original coordinate, not wherever the overtaking packet moved the cursor.
+captured.clear()
+remote.apply({'type':'move','x':.8,'y':.8,'seq':2,'_owner':'reordered'})
+remote.apply({'type':'button','button':0,'down':True,'x':.1,'y':.2,'seq':1,'_owner':'reordered'})
+assert captured[-2].mi.dwFlags==0x8001 and captured[-2].mi.dx==round(.1*65535) and captured[-2].mi.dy==round(.2*65535)
+assert captured[-1].mi.dwFlags==2,'Reliable DOWN must never be discarded with its older coordinate sequence'
+before=len(captured)
+remote.apply({'type':'move','x':.4,'y':.4,'seq':2,'_owner':'reordered'})
+assert len(captured)==before,'Authoritative button coordinates must retain the highest motion fence'
+remote.apply({'type':'move','x':.9,'y':.9,'seq':4,'_owner':'reordered'})
+remote.apply({'type':'button','button':0,'down':False,'x':.3,'y':.4,'seq':3,'_owner':'reordered'})
+assert captured[-2].mi.dx==round(.3*65535) and captured[-2].mi.dy==round(.4*65535) and captured[-1].mi.dwFlags==4
+assert remote.owners['reordered']['moveSeq']==4 and not remote.buttons
+
+# Failed native updates cancel any held Windows contact before mouse fallback.
+cancelled=[]
+remote.native_touch=True;remote.touch_owner='phone'
+def failed_update(event):raise OSError(87,'Rejected touch UPDATE')
+remote.touch=SimpleNamespace(apply=failed_update,release=lambda cancel:cancelled.append(cancel),active=True)
+remote._touch_drag_target=lambda x,y:False
+remote.apply({'type':'touch','phase':'down','_owner':'phone','x':.4,'y':.4})
+assert cancelled==[True] and not remote.native_touch
 print('Verified dropped relative packets recover before click and stale touch cannot revive a released contact. No desktop input was injected.')

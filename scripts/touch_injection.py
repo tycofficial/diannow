@@ -41,6 +41,19 @@ class NativeTouch:
                 try:
                     # Windows requires UP to match a preceding UPDATE, even
                     # when a tap never moved. DOWN -> UP could fail with 87.
-                    if not self.updated:self.inject(0x20000|2|4,self.position)
-                    self.inject(0x40000|(0x8000 if cancel else 0),self.position)
+                    if not self.updated:
+                        try:self.inject(0x20000|2|4,self.position)
+                        except OSError:pass
+                    # Even a rejected UPDATE must not prevent the cancellation
+                    # attempt from reaching Windows.
+                    try:self.inject(0x40000|(0x8000 if cancel else 0),self.position)
+                    except OSError:
+                        # Keep the contact position available until a failed
+                        # ordinary UP has had its cancellation attempt.
+                        if not cancel:
+                            try:self.inject(0x48000,self.position)
+                            except OSError:pass
+                        raise
+                    # Successful UP is authoritative even if the preceding
+                    # UPDATE failed; replaying a mouse fallback could click twice.
                 finally:self.active=False

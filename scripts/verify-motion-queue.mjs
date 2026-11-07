@@ -17,4 +17,13 @@ queue.flush();assert.equal(sent.length,1);assert.equal(sent[0].event.totalX,200)
 queue.emit({type:'relative',dx:5,dy:7});queue.emit({type:'button',button:0,down:true});
 assert.equal(sent[1].fast,true);assert.deepEqual(sent[2].event.relativeSnapshot,{totalX:205,totalY:-93,seq:101});
 assert.equal(sent[2].fast,false);queue.reset();queue.flush();assert.equal(sent.length,3);
+queue.reset();sent.length=0;
+for(let i=0;i<500;i++)queue.emit({type:'move',x:i/500,y:.5});
+assert.equal(sent.length,0,'Direct-drag absolute moves must not flood the reliable channel');queue.flush();assert.equal(sent.length,1);assert.equal(sent[0].fast,true);assert.equal(sent[0].event.x,499/500);
+queue.emit({type:'move',x:.8,y:.6});queue.emit({type:'button',button:0,down:false,x:1,y:.6});queue.flush();assert.equal(sent.length,2,'A coordinate release must discard older unsent absolute positions');assert.equal(sent[1].event.type,'button');
+let blocked=true;const retry=[];const congested=new MotionQueue((event,fast)=>{if(blocked)return false;retry.push({event,fast});return true});
+congested.emit({type:'move',x:.1,y:.2});congested.flush();congested.emit({type:'move',x:.9,y:.8});blocked=false;congested.flush();assert.equal(retry.length,1);assert.equal(retry[0].event.x,.9,'Retry only the newest unsent move');
+blocked=true;congested.emit({type:'relative',dx:7,dy:-3});congested.emit({type:'touch',phase:'down',x:0,y:0});congested.emit({type:'touch',phase:'move',x:.5,y:.5});congested.flush();congested.discardPending();blocked=false;congested.flush();assert.equal(retry.length,1,'Release must discard every pending motion type');
+congested.emit({type:'relative',dx:2,dy:4});congested.flush();assert.deepEqual([retry.at(-1).event.totalX,retry.at(-1).event.totalY],[2,4],'Canceled relative deltas must not replay in the next gesture');assert(retry.at(-1).event.seq>1,'Cancellation must retain the monotonic sequence');
+const boundary=[];let fastBlocked=true;const snapshotQueue=new MotionQueue((event,fast)=>{if(fast&&fastBlocked)return false;boundary.push(event);return true});snapshotQueue.emit({type:'relative',dx:12,dy:5});snapshotQueue.emit({type:'button',button:0,down:true});assert.equal(boundary.length,1);assert.deepEqual(boundary[0].relativeSnapshot,{totalX:12,totalY:5,seq:1});fastBlocked=false;snapshotQueue.flush();assert.equal(boundary.length,1,'Accepted reliable position snapshots supersede unsent relative movement');
 console.log('Verified latest-only touch motion, gesture boundaries, cumulative trackpad recovery and reset.');
