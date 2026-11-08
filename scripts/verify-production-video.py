@@ -14,6 +14,7 @@ import aiortc.rtcrtpreceiver as receiver_module
 from aiortc import RTCPeerConnection,RTCConfiguration,RTCBundlePolicy,RTCSessionDescription,RTCIceServer
 from aiortc.jitterbuffer import JitterBuffer
 from realtime_clock import run_realtime
+from delivery_acceptance import delivery_failures
 
 ORIGIN='https://desktop-live-tianw-1105.tyc130923.chatgpt.site'
 
@@ -122,8 +123,9 @@ async def main(seconds,qualities,relay=False,relay_udp=False,relay_direct_tcp=Fa
         pairs=[{'local':pair.local_candidate.type,'remote':pair.remote_candidate.type} for pair in video.receiver.transport.transport._connection._nominated.values()]
         result={'phases':phases,'localDirectPipeline':bool(pairs) and all(p['local']!='relay' and p['remote']!='relay' for p in pairs),'forcedRelay':relay,'relayTransport':'udp' if relay_udp else 'direct-tcp' if relay_direct_tcp else 'proxy-tcp' if relay else None,'candidatePairs':pairs,'connectionState':peer.connectionState,'phoneNetworkMeasured':False,'desktopInput':False,'playback':False}
         print(json.dumps(result),flush=True)
-        assert peer.connectionState=='connected','The peer stopped'
-        assert all(p['zeroFpsIntervals']==0 for p in phases),'A real decoded-video interval froze'
+        failures=delivery_failures(phases,peer.connectionState=='connected')
+        print(json.dumps({'acceptancePassed':not failures,'acceptanceFailures':failures,'criteria':{'minimumAverageDecodedFps':58,'minimumOneSecondDecodedFps':50,'maximumFrameGapMs':100},'phoneNetworkMeasured':False}),flush=True)
+        assert not failures,'; '.join(failures)
     finally:
         if channel.readyState=='open':
             channel.send(json.dumps({'type':'disconnect'}));await asyncio.sleep(.1)

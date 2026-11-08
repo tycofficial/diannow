@@ -1,7 +1,15 @@
 export class MotionQueue {
   constructor(send){this.send=send;this.reset()}
-  reset(){this.touchId=0;this.touchSeq=0;this.relativeX=0;this.relativeY=0;this.relativeSeq=0;this.pendingTouch=null;this.pendingMove=null;this.pendingRelative=null}
-  discardPending(){if(this.pendingRelative){this.relativeX-=this.pendingRelative.dx;this.relativeY-=this.pendingRelative.dy}this.pendingTouch=null;this.pendingMove=null;this.pendingRelative=null}
+  reset(){this.touchId=0;this.touchSeq=0;this.relativeX=0;this.relativeY=0;this.relativeSeq=0;this.relativeCheckpointSeq=0;this.pendingTouch=null;this.pendingMove=null;this.pendingRelative=null}
+  discardPending(){if(this.pendingRelative){this.relativeX-=this.pendingRelative.dx;this.relativeY-=this.pendingRelative.dy}this.relativeCheckpointSeq=this.relativeSeq;this.pendingTouch=null;this.pendingMove=null;this.pendingRelative=null}
+  checkpointRelative(){
+    if(this.relativeSeq<=this.relativeCheckpointSeq)return true;
+    // The unordered channel can lose the last move. Commit cumulative totals
+    // on the reliable channel without replaying deltas already sent there.
+    const event={type:'relative',totalX:this.relativeX,totalY:this.relativeY,seq:this.relativeSeq,dx:this.pendingRelative?.dx||0,dy:this.pendingRelative?.dy||0,checkpoint:true};
+    if(this.send(event,false)===false)return false;
+    this.relativeCheckpointSeq=this.relativeSeq;this.pendingRelative=null;return true;
+  }
   emit(event){
     if(event.type==='touch'){
       if(event.phase==='down'){this.touchId++;this.touchSeq=0}
@@ -17,7 +25,7 @@ export class MotionQueue {
     if(event.type==='button'&&event.x!==undefined&&event.y!==undefined)this.pendingMove=null;
     if(event.type==='button'&&this.relativeSeq){this.flush();event={...event,relativeSnapshot:{totalX:this.relativeX,totalY:this.relativeY,seq:this.relativeSeq}}}
     const accepted=this.send(event);
-    if(event.type==='button'&&event.relativeSnapshot&&accepted!==false)this.pendingRelative=null;
+    if(event.type==='button'&&event.relativeSnapshot&&accepted!==false){this.relativeCheckpointSeq=this.relativeSeq;this.pendingRelative=null}
     return accepted;
   }
   flush(){

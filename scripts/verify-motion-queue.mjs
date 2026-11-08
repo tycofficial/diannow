@@ -26,4 +26,17 @@ congested.emit({type:'move',x:.1,y:.2});congested.flush();congested.emit({type:'
 blocked=true;congested.emit({type:'relative',dx:7,dy:-3});congested.emit({type:'touch',phase:'down',x:0,y:0});congested.emit({type:'touch',phase:'move',x:.5,y:.5});congested.flush();congested.discardPending();blocked=false;congested.flush();assert.equal(retry.length,1,'Release must discard every pending motion type');
 congested.emit({type:'relative',dx:2,dy:4});congested.flush();assert.deepEqual([retry.at(-1).event.totalX,retry.at(-1).event.totalY],[2,4],'Canceled relative deltas must not replay in the next gesture');assert(retry.at(-1).event.seq>1,'Cancellation must retain the monotonic sequence');
 const boundary=[];let fastBlocked=true;const snapshotQueue=new MotionQueue((event,fast)=>{if(fast&&fastBlocked)return false;boundary.push(event);return true});snapshotQueue.emit({type:'relative',dx:12,dy:5});snapshotQueue.emit({type:'button',button:0,down:true});assert.equal(boundary.length,1);assert.deepEqual(boundary[0].relativeSnapshot,{totalX:12,totalY:5,seq:1});fastBlocked=false;snapshotQueue.flush();assert.equal(boundary.length,1,'Accepted reliable position snapshots supersede unsent relative movement');
-console.log('Verified latest-only touch motion, gesture boundaries, cumulative trackpad recovery and reset.');
+{
+ const delivered=[],healing=new MotionQueue((event,fast)=>{if(!fast)delivered.push(event);return true});
+ healing.emit({type:'relative',dx:25,dy:-8});healing.flush();
+ assert.equal(delivered.length,0,'Simulate an accepted but lost unreliable final move');
+ healing.checkpointRelative();assert.equal(delivered.length,1);assert.deepEqual([delivered[0].totalX,delivered[0].totalY,delivered[0].dx,delivered[0].dy],[25,-8,0,0]);
+ healing.checkpointRelative();assert.equal(delivered.length,1,'An idle pointer must not keep sending reliable checkpoints');
+ healing.emit({type:'relative',dx:3,dy:4});healing.checkpointRelative();healing.flush();
+ assert.equal(delivered.length,2);assert.deepEqual([delivered[1].totalX,delivered[1].totalY,delivered[1].dx,delivered[1].dy],[28,-4,3,4]);
+ healing.emit({type:'relative',dx:100,dy:100});healing.discardPending();healing.checkpointRelative();assert.equal(delivered.length,2,'Cancel cannot replay a discarded motion through a checkpoint');
+ let congested=true;const retry=[],blocked=new MotionQueue((event,fast)=>{if(congested)return false;retry.push({event,fast});return true});
+ blocked.emit({type:'relative',dx:7,dy:2});assert.equal(blocked.checkpointRelative(),false);blocked.emit({type:'relative',dx:4,dy:1});congested=false;blocked.checkpointRelative();blocked.flush();
+ assert.equal(retry.length,1);assert.equal(retry[0].fast,false);assert.deepEqual([retry[0].event.totalX,retry[0].event.totalY],[11,3],'A failed checkpoint retries the current position, without replaying stale positions');
+}
+console.log('Verified latest-only touch motion, gesture boundaries, cumulative trackpad recovery, reliable final positions and reset.');

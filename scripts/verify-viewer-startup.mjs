@@ -3,6 +3,8 @@ import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 
 const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(await readFile('web/gestures.mjs','utf8')).replaceAll('export class','class'));
+assert.match(html,/<option value="480" selected>/,'The actual initial HTML selection must request 480P');
+assert.doesNotMatch(html,/<option value="1080" selected>/);
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
@@ -11,7 +13,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
     const listeners={};
-    nodes[id]={style:{},children:[],textContent:'',value:id==='quality'?'1080':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
+    nodes[id]={style:{},children:[],textContent:'',value:id==='quality'?'480':id==='deviceMode'?'desktop':id==='typingMode'?'live':id==='audioMode'?'low':id==='typing'?'':'60',options:[],listeners,muted:['screen','desktopAudio'].includes(id),playCalls:0,
       classList:{toggle(){open=!open;return open}},attributes:{},setAttribute(name,value){this.attributes[name]=String(value)},appendChild(child){this.children.push(child)},addEventListener(type,listener){(listeners[type]??=[]).push(listener)},focus(){this.focusCalls=(this.focusCalls||0)+1},blur(){},async play(){this.playCalls++;if(this.playFailure)throw new Error('Playback blocked')},setPointerCapture(){},getBoundingClientRect(){return {left:0,top:0,width:1280,height:720}}};
   }
   class Peer{
@@ -19,7 +21,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
     remoteDescriptions=0;
     constructor(config){this.config=config;peers.push(this)}
     createDataChannel(label){const channel={label,readyState:'open',bufferedAmount:0,send(value){if(channel.fail)throw new Error('Data channel failed');sent.push(JSON.parse(value))}};channels.push(channel);return channel}
-    addTransceiver(){return {sender:{}}}
+    addTransceiver(kind){const transceiver={kind,sender:{replaceCalls:[],async replaceTrack(track){this.replaceCalls.push(track);if(this.replaceHandler)return await this.replaceHandler(track);this.track=track}}};(this.transceivers??=[]).push(transceiver);return transceiver}
     async createOffer(){return {type:'offer',sdp:'test-sdp'}}
     async setLocalDescription(value){this.localDescription=value}
     async setRemoteDescription(){this.remoteDescriptions++;if(this.connectionState==='closed')throw new Error('Cannot answer a closed peer');this.connectionState='connected';this.onconnectionstatechange()}
@@ -33,7 +35,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   function setTimer(callback,delay){if(wrongReceiver(this))throw new TypeError('Can only call Window.setTimeout on instances of Window');timers.set(++timerId,{callback,delay});return timerId}
   function clearTimer(id){if(wrongReceiver(this))throw new TypeError('Can only call Window.clearTimeout on instances of Window');timers.delete(id)}
   const navigator={audioSession:{type:'auto'}};
-  const document={hidden:initialHidden,getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(type,listener){(documentListeners[type]??=[]).push(listener)}};
+  const document={hidden:initialHidden,body:{classList:{toggle(){}}},getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(type,listener){(documentListeners[type]??=[]).push(listener)}};
   const context=vm.createContext({window,navigator,document,
     location:{hostname:'screen.example',href:'https://screen.example/',replace(value){navigations.push(value)}},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(callback){animationFrames.push(callback)},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},URL,AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
@@ -60,7 +62,7 @@ assert.equal(connected.peers[0].config.iceServers[0].username,'test');
 assert.equal(connected.peers[0].config.iceTransportPolicy,'all');
 assert.equal(connected.peers[0].config.bundlePolicy,'balanced');
 assert.equal(JSON.parse(connected.requests[0].options.body).separateControl,true);
-assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'1080');
+assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'480');
 assert.equal(JSON.parse(connected.requests[0].options.body).preferences.fps,60);
 assert.equal(JSON.parse(connected.requests[0].options.body).preferences.fixedProfile,true);
 assert.equal(connected.requests[0].options.credentials,'omit');
@@ -324,7 +326,7 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(18);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=18/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(20);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=20/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }
 
 const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,clientY:100,button:0,preventDefault(){},...overrides});
@@ -368,6 +370,32 @@ const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,cli
  assert.equal(viewer.sent.length,before,'Released keyboard keys cannot start repeating again');
 }
 console.log('Verified congested touch boundaries, stale-input expiry, lost pointer capture, final mouse position and keyboard repeat cleanup.');
+
+{
+ const viewer=await start(true),pad=viewer.nodes.trackpad,mode=viewer.nodes.deviceMode,control=viewer.channels[0];
+ mode.value='trackpad';mode.onchange();assert.equal(pad.hidden,false);assert.equal(viewer.nodes.remoteCursor.hidden,true,'Trackpad mode hides the remote desktop cursor immediately');
+ control.onmessage({data:JSON.stringify({type:'pong',time:0,inputFeatures:['relativePointer'],cursor:{x:.2,y:.3,visible:true}})});
+ assert.equal(viewer.nodes.remoteCursor.hidden,true,'Server cursor reports cannot place a cursor over the trackpad');
+ pad.setPointerCapture=()=>{throw new Error('Pointer capture unavailable')};
+ const before=viewer.sent.length;pad.onpointerdown(pointer({clientX:10,clientY:20}));
+ viewer.dispatchWindow('pointermove',pointer({target:{tagName:'BODY'},clientX:40,clientY:50}));
+ viewer.stepFrame();
+ assert(viewer.sent.slice(before).some(e=>e.type==='relative'&&e.totalX>0),'Movement outside the pad still works after pointer capture fails');
+ viewer.dispatchWindow('pointerup',pointer({target:{tagName:'BODY'},clientX:45,clientY:55}));
+ const checkpoint=viewer.sent.at(-1);assert.equal(checkpoint.type,'relative');assert.equal(checkpoint.checkpoint,true);
+ assert.equal(checkpoint.totalX,52.5);assert.equal(checkpoint.totalY,52.5,'The reliable final checkpoint contains the complete gesture, including pointerup movement');
+ const count=viewer.sent.length;viewer.stepFrame();assert.equal(viewer.sent.length,count,'A completed reliable checkpoint must not replay its pending movement');
+ viewer.advanceTime(151);viewer.stepFrame();assert.equal(viewer.sent.length,count,'Idle pads do not send repeated reliable snapshots');
+ pad.onpointerdown(pointer({clientX:10,clientY:20}));pad.onpointermove(pointer({clientX:20,clientY:30}));viewer.advanceTime(151);viewer.stepFrame();
+ assert.equal(viewer.sent.at(-1).checkpoint,true,'Active movement also receives a bounded reliable checkpoint');
+ mode.value='desktop';mode.onchange();assert.equal(pad.hidden,true);assert.equal(viewer.nodes.remoteCursor.hidden,false);
+ const legacy=await start(true),legacyPad=legacy.nodes.trackpad;
+ legacy.channels[0].onmessage({data:JSON.stringify({type:'pong',time:0,inputFeatures:[]})});
+ legacyPad.onpointerdown(pointer({clientX:0,clientY:0}));legacyPad.onpointermove(pointer({clientX:20,clientY:0}));legacy.stepFrame();
+ const moves=legacy.sent.filter(e=>e.type==='move').length;legacyPad.onpointerup(pointer({clientX:20,clientY:0}));legacy.advanceTime(151);legacy.stepFrame();
+ assert.equal(legacy.sent.filter(e=>e.type==='move').length,moves,'Legacy absolute fallback must not replay deltas in reliable checkpoints');
+ console.log('Verified trackpad cursor isolation, capture failure motion, reliable final/periodic positions and compatible legacy movement. No desktop input was injected.');
+}
 
 {
  const viewer=await start(true),event={key:'Shift',code:'ShiftLeft',preventDefault(){},target:{tagName:'BODY'}};
@@ -459,7 +487,8 @@ console.log('Verified dead-decoder recovery despite incoming frames, unavailable
  assert.equal(viewer.nodes.framerate.value,'60','A 120Hz source must not override the fixed 60fps selection');
  viewer.nodes.quality.value='720';viewer.nodes.quality.onchange();assert.equal(viewer.sent.at(-1).fixedProfile,true);
  viewer.nodes.quality.value='auto';viewer.nodes.quality.onchange();assert.equal(viewer.sent.at(-1).fixedProfile,false);
- console.log('Verified fixed 1080P60 default, explicit automatic mode and no source-refresh override.');
+ viewer.nodes.quality.value='1080';viewer.nodes.quality.onchange();assert.equal(viewer.sent.at(-1).quality,'1080');assert.equal(viewer.sent.at(-1).fps,60);assert.equal(viewer.sent.at(-1).fixedProfile,true);
+ console.log('Verified fixed 480P60 default, manual fixed 1080P60, explicit automatic mode and no source-refresh override.');
 }
 
 {
@@ -497,7 +526,7 @@ console.log('Verified dead-decoder recovery despite incoming frames, unavailable
 }
 {
  const viewer=await start(true,scripts,undefined,undefined,12,undefined,true),peer=viewer.peers[0];
- const offer=JSON.parse(viewer.requests.find(e=>e.path==='/api/offer').options.body);assert.equal(offer.preferences.videoEnabled,false);assert.equal(offer.preferences.quality,'1080');assert.equal(offer.preferences.fps,60);assert.equal(offer.preferences.fixedProfile,true);
+ const offer=JSON.parse(viewer.requests.find(e=>e.path==='/api/offer').options.body);assert.equal(offer.preferences.videoEnabled,false);assert.equal(offer.preferences.quality,'480');assert.equal(offer.preferences.fps,60);assert.equal(offer.preferences.fixedProfile,true);
  peer.ontrack({track:{kind:'video',stop(){}},receiver:{}});assert.equal(viewer.nodes.screen.playCalls,0,'A page connected in the background must not start its video element');assert.equal(viewer.sent.filter(e=>e.type==='videoState').at(-1).enabled,false);
 }
 {
@@ -531,4 +560,44 @@ console.log('Verified reliable per-session background video suspension, preserve
  assert(fallbacks.every(server=>server.urls.every(url=>!url.includes('transport=udp'))));
 }
 console.log('Verified same-endpoint UDP-first browser candidates, IPv6/plain/TLS URI safety, retained TCP/TLS fallbacks and unchanged API credentials. No media or network was used.');
+
+{
+ const deferred=()=>{let resolve,reject;const promise=new Promise((ok,fail)=>{resolve=ok;reject=fail});return {promise,resolve,reject}};
+ function stream(){const make=()=>({kind:'audio',readyState:'live',stops:0,listeners:{},stop(){this.stops++;this.readyState='ended'},addEventListener(type,callback){this.listeners[type]=callback}}),tracks=[make(),make()];return {tracks,getTracks:()=>tracks,getAudioTracks:()=>tracks}}
+ function ready(viewer){viewer.channels.filter(channel=>channel.label==='input').at(-1).onmessage({data:JSON.stringify({type:'pong',time:0,microphoneReady:true})})}
+ function sender(viewer){return viewer.peers.at(-1).transceivers.find(transceiver=>transceiver.kind==='audio').sender}
+ function permission(viewer){const requests=[];viewer.navigator.mediaDevices={getUserMedia(){const request=deferred();requests.push(request);return request.promise}};ready(viewer);return requests}
+ {
+  const viewer=await start(true),requests=permission(viewer),button=viewer.nodes.microphone;
+  const first=button.onclick();await button.onclick();assert.equal(requests.length,1,'Repeated taps must not open competing microphone requests');assert.equal(button.disabled,true);
+  const acquired=stream();requests[0].resolve(acquired);await first;
+  assert.equal(sender(viewer).replaceCalls[0],acquired.tracks[0]);assert.equal(button.attributes['aria-pressed'],'true');assert.equal(button.disabled,false);
+  await button.onclick();assert(acquired.tracks.every(track=>track.stops>0),'Turning off must stop every acquired track');assert.equal(sender(viewer).replaceCalls.at(-1),null);assert.equal(button.attributes['aria-pressed'],'false');
+ }
+ {
+  const viewer=await start(true),requests=permission(viewer),button=viewer.nodes.microphone,oldSender=sender(viewer),first=button.onclick();
+  await viewer.nodes.stop.onclick();const acquired=stream();requests[0].resolve(acquired);await first;
+  assert(acquired.tracks.every(track=>track.stops>0));assert.equal(oldSender.replaceCalls.length,0,'A permission result received after disconnect must never attach');assert.equal(button.disabled,false);assert.equal(button.attributes['aria-pressed'],'false');
+  assert(!viewer.sent.some(event=>event.type==='microphoneState'&&event.enabled));
+ }
+ {
+  const viewer=await start(true),requests=permission(viewer),button=viewer.nodes.microphone,oldSender=sender(viewer),oldRequest=button.onclick();
+  viewer.nodes.connect.onclick();await flush();ready(viewer);const newSender=sender(viewer),newRequest=button.onclick();assert.notEqual(newSender,oldSender);assert.equal(requests.length,2);
+  const obsolete=stream();requests[0].resolve(obsolete);await oldRequest;
+  assert(obsolete.tracks.every(track=>track.stops>0));assert.equal(oldSender.replaceCalls.length,0);assert.equal(newSender.replaceCalls.length,0,'Old permission must not attach to the new session sender');assert.equal(button.disabled,true,'An old completion must not unlock a new pending request');
+  const current=stream();requests[1].resolve(current);await newRequest;assert.equal(newSender.replaceCalls[0],current.tracks[0]);assert.equal(button.attributes['aria-pressed'],'true');assert.equal(button.disabled,false);
+  current.tracks[0].readyState='ended';current.tracks[0].listeners.ended();await flush();assert(current.tracks.every(track=>track.stops>0));assert.equal(button.attributes['aria-pressed'],'false');assert.equal(viewer.sent.filter(event=>event.type==='microphoneState').at(-1).enabled,false,'Device revocation releases the virtual microphone route');
+ }
+ {
+  const viewer=await start(true),requests=permission(viewer),button=viewer.nodes.microphone,oldSender=sender(viewer),attached=deferred();oldSender.replaceHandler=()=>attached.promise;
+  const pending=button.onclick(),acquired=stream();requests[0].resolve(acquired);await flush();assert.equal(oldSender.replaceCalls[0],acquired.tracks[0]);
+  await viewer.nodes.stop.onclick();assert(acquired.tracks.every(track=>track.stops>0),'Disconnect stops devices while replaceTrack is pending');attached.resolve();await pending;
+  assert(!viewer.sent.some(event=>event.type==='microphoneState'&&event.enabled));assert.equal(button.attributes['aria-pressed'],'false');assert.equal(button.disabled,false);
+ }
+ {
+  const viewer=await start(true),requests=permission(viewer),button=viewer.nodes.microphone;sender(viewer).replaceHandler=async()=>{throw new Error('Synthetic replaceTrack failure')};
+  const pending=button.onclick(),acquired=stream();requests[0].resolve(acquired);await pending;assert(acquired.tracks.every(track=>track.stops>0));assert.equal(button.attributes['aria-pressed'],'false');assert.equal(button.disabled,false);
+ }
+ console.log('Verified serialized microphone permission, disconnect/reconnect generation fencing, pending attachment cleanup, track revocation and replaceTrack failure. No microphone or network was opened.');
+}
 }

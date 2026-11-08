@@ -43,7 +43,13 @@ def endpoints(flow):
 class CoreAudio:
     def __init__(self):
         self.ole=c.OleDLL('ole32');self.base=c.WinDLL('combase')
-        self.ole.CoInitializeEx(None,0)
+        self.enumerator=None;self.factory=None
+        code=self.ole.CoInitializeEx(None,0)
+        if code<0:raise OSError(f'CoInitializeEx 0x{code&0xffffffff:08x}')
+        self.com_initialized=True
+        try:self._initialize()
+        except BaseException:self.close();raise
+    def _initialize(self):
         self.enumerator=self.create('bcde0395-e52f-467c-8e3d-c4579291692e','a95664d2-9614-4f35-a746-de8db63617e6')
         self.base.WindowsCreateString.argtypes=[w.LPCWSTR,w.UINT,c.POINTER(c.c_void_p)]
         self.base.WindowsDeleteString.argtypes=[c.c_void_p]
@@ -56,7 +62,9 @@ class CoreAudio:
             if code<0:raise OSError(f'Audio routing factory 0x{code&0xffffffff:08x}')
         finally:self.base.WindowsDeleteString(name)
     def create(self,cls,iid):
-        pointer=c.c_void_p();self.ole.CoCreateInstance(c.byref(GUID(cls)),None,23,c.byref(GUID(iid)),c.byref(pointer));return pointer
+        pointer=c.c_void_p();code=self.ole.CoCreateInstance(c.byref(GUID(cls)),None,23,c.byref(GUID(iid)),c.byref(pointer))
+        if code<0:raise OSError(f'CoCreateInstance 0x{code&0xffffffff:08x}')
+        return pointer
     def hstring(self,text):
         result=c.c_void_p();code=self.base.WindowsCreateString(text,len(text),c.byref(result))
         if code<0:raise OSError('WindowsCreateString failed')
@@ -119,10 +127,17 @@ class CoreAudio:
                 finally:release(extended);release(session)
         finally:release(enumerator);release(manager);release(device)
         return result
-    def close(self):release(self.factory);release(self.enumerator);self.ole.CoUninitialize()
+    def close(self):
+        factory,self.factory=self.factory,None;enumerator,self.enumerator=self.enumerator,None
+        initialized,self.com_initialized=getattr(self,'com_initialized',False),False
+        try:release(factory)
+        finally:
+            try:release(enumerator)
+            finally:
+                if initialized:self.ole.CoUninitialize()
 
 class MicrophoneRouting:
-    def __init__(self):self.saved={}
+    def __init__(self):self.saved={};self.applied={}
     def apply(self,core,capture,mic,enabled):
         physical=next((identifier for name,identifier in capture if any(word in name.lower() for word in ['microphone','麦克风']) and not any(word in name.lower() for word in ['cable','virtual'])),None)
         # Repair defaults left pointing at a virtual input by older versions.
@@ -130,17 +145,23 @@ class MicrophoneRouting:
             virtual={identifier for name,identifier in capture if 'cable' in name.lower()}
             for role in range(3):
                 if core.default(1,role) in virtual:core.set_default(physical,role)
-        if enabled and mic and not self.saved:
-            self.saved={role:core.default(1,role) for role in range(3)}
-            for role in range(3):core.set_default(mic,role)
+        if enabled and mic:
+            if not self.saved:self.saved={role:core.default(1,role) for role in range(3)}
+            # Retry partial policy failures and endpoint restarts. Previously
+            # one failed role left saved nonempty and was never applied again.
+            for role in range(3):
+                if core.default(1,role)!=mic:core.set_default(mic,role)
+                self.applied[role]=mic
         elif not enabled and self.saved:
-            for role,identifier in self.saved.items():core.set_default(identifier,role)
-            self.saved.clear()
+            for role,identifier in list(self.saved.items()):
+                if core.default(1,role)==self.applied.get(role):core.set_default(identifier,role)
+                del self.saved[role];self.applied.pop(role,None)
     def restore(self,core):
         for role,identifier in self.saved.items():
-            try:core.set_default(identifier,role)
+            try:
+                if core.default(1,role)==self.applied.get(role):core.set_default(identifier,role)
             except OSError:pass
-        self.saved.clear()
+        self.saved.clear();self.applied.clear()
 
 class AudioRouter:
     def __init__(self):
@@ -154,28 +175,47 @@ class AudioRouter:
         if self.thread:return
         self.thread=threading.Thread(target=self.run,name='IndependentAudioRouting',daemon=True);self.thread.start()
     def run(self):
-        core=None;saved={};microphone=MicrophoneRouting();last_routes=0
+        core=None;saved={};routed=set();last_desktop=None;microphone=MicrophoneRouting();last_routes=0
         try:
-            core=CoreAudio()
             while not self.stop_event.is_set():
-                render=endpoints(0);capture=endpoints(1)
-                desktop=next((identifier for name,identifier in render if 'hi-fi cable input' in name.lower()),None)
-                mic=next((identifier for name,identifier in capture if 'cable output' in name.lower() and 'hi-fi' not in name.lower()),None)
-                self.microphone_ready=bool(mic)
-                with self.lock:enabled=bool(self.microphone_owners)
-                microphone.apply(core,capture,mic,enabled)
-                if desktop and time.monotonic()-last_routes>=1:
-                    last_routes=time.monotonic()
-                    core.normalize_virtual(desktop)
-                    for name,identifier in render:
-                        for pid in core.processes(identifier):
-                            if pid==os.getpid() or pid in saved:continue
-                            try:
-                                previous={role:core.get_route(pid,role) for role in range(3)}
-                                for role in range(3):core.set_route(pid,role,desktop)
-                                saved[pid]=previous
-                            except OSError:continue  # exited/system sessions can reject per-app routing
-                    self.ready=True
+                try:
+                    if core is None:core=CoreAudio()
+                    render=endpoints(0);capture=endpoints(1)
+                    desktop=next((identifier for name,identifier in render if 'hi-fi cable input' in name.lower()),None)
+                    mic=next((identifier for name,identifier in capture if 'cable output' in name.lower() and 'hi-fi' not in name.lower()),None)
+                    if desktop!=last_desktop:routed.clear();last_desktop=desktop
+                    self.microphone_ready=bool(mic);self.ready=bool(desktop)
+                    with self.lock:enabled=bool(self.microphone_owners)
+                    microphone.apply(core,capture,mic,enabled)
+                    if desktop and time.monotonic()-last_routes>=1:
+                        last_routes=time.monotonic()
+                        core.normalize_virtual(desktop)
+                        for name,identifier in render:
+                            try:processes=core.processes(identifier)
+                            except OSError:continue  # one removed endpoint must not stop all routing
+                            for pid in processes:
+                                if pid==os.getpid() or pid in routed:continue
+                                try:
+                                    previous=saved.get(pid)
+                                    if previous is None:previous={role:core.get_route(pid,role) for role in range(3)}
+                                    # Save before changing roles, so a partial
+                                    # failure remains restorable at shutdown.
+                                    saved[pid]=previous
+                                    for role in range(3):core.set_route(pid,role,desktop)
+                                    routed.add(pid)
+                                except OSError:continue
+                    self.error=None
+                except Exception as error:
+                    # Devices can disappear during suspend/resume or the
+                    # Windows Audio service restarting. Keep the worker alive.
+                    self.error=type(error).__name__+': '+str(error);self.ready=False;self.microphone_ready=False
+                    # An RPC-disconnected COM proxy remains broken forever.
+                    # Recreate it on this same COM-owning routing thread while
+                    # retaining original routes and microphone ownership.
+                    if core:
+                        try:core.close()
+                        except Exception:pass
+                    core=None;routed.clear();last_routes=0
                 self.wake_event.wait(1);self.wake_event.clear()
         except Exception as error:self.error=str(error)
         finally:

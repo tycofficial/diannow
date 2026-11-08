@@ -24,8 +24,10 @@ from ice_consent import install_consent_window
 from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
 from turn_route import select_udp_turn_route
+from capture_recovery import RecoveringCamera
 from control_transport import isolate_control
 from encoded_pipeline import install_encoded_pipeline
+from media_encoder import install_media_encoder
 from video_retransmission import install_video_retransmission
 from bitrate_stability import BitrateStability
 from stream_profile import stream_dimensions, stream_bitrate
@@ -226,7 +228,9 @@ class SharedFrameSource:
         with self.condition:
             if self.reader is None:
                 self.reader=threading.Thread(target=self._capture,name='LatestDesktopFrame',daemon=True);self.reader.start()
-            if not self.condition.wait_for(lambda:self.closed or (self.raw is not None and (after is None or self.captured_at>after) and self.clock()-self.captured_at<2),timeout=2):
+            # Leave headroom for bounded output-loss recovery before the
+            # track's eight-second frame watchdog tears down a healthy peer.
+            if not self.condition.wait_for(lambda:self.closed or (self.raw is not None and (after is None or self.captured_at>after) and self.clock()-self.captured_at<2),timeout=6):
                 raise RuntimeError(self.reader_error or 'Desktop capture stopped producing frames; reconnecting.')
             if self.closed:raise RuntimeError('Desktop frame source is closed.')
             return self.raw,self.captured_at,self.generation
@@ -423,6 +427,10 @@ class DesktopSession:
         sender=getattr(self,'video_sender',None)
         encoder=getattr(sender,'_RTCRtpSender__encoder',None)
         result={'videoEnabled':getattr(self,'video_enabled',True),'selectedTurnTransport':getattr(getattr(self,'owner',None),'selected_turn_transport','unchanged')}
+        route=getattr(getattr(self,'owner',None),'ice_config',{})
+        result.update({key:route[key] for key in ('turnRouteCandidates','turnRouteSucceeded','turnRouteAllocationMs','turnRouteCached') if key in route})
+        capture=getattr(getattr(getattr(self,'owner',None),'camera',None),'diagnostics',None)
+        if isinstance(capture,dict):result['capture']=capture
         connection=getattr(getattr(getattr(sender,'transport',None),'transport',None),'_connection',None)
         if connection is not None:
             result['turnClientTransport']=getattr(connection,'turn_transport',None)
@@ -431,6 +439,8 @@ class DesktopSession:
         if encoder is not None:result.update(targetBitrate=getattr(encoder,'target_bitrate',None),fixedProfile=getattr(encoder,'fixed_profile',False),codecGenerations=getattr(encoder,'codec_generations',0))
         pipeline=getattr(sender,'_encoded_pipeline',None)
         if pipeline is not None:result['pipeline']=dict(pipeline.stats)
+        worker=getattr(sender,'_media_encoder_worker',None)
+        if worker is not None:result['encoderWorker']=dict(worker.stats)
         history=getattr(sender,'_video_retransmission',None)
         if history is not None:result['retransmission']=dict(history)
         flow=getattr(self,'turn_flow',None)
@@ -489,6 +499,7 @@ class DesktopSession:
         track.set_streaming(False)
         cnames={'video':self.session_id+'-video','audio':self.session_id+'-audio'}
         self.video_sender=pc.addTrack(track);independent_media_sender(self.video_sender,cnames['video']);self.last_keyframe_request=0
+        install_media_encoder(self.video_sender)
         install_encoded_pipeline(self.video_sender)
         install_video_retransmission(self.video_sender)
         print(json.dumps({'sessionId':self.session_id,'streamStarted':True,'width':width,'height':height,'targetFps':fps}),flush=True)
@@ -500,6 +511,7 @@ class DesktopSession:
                     raise RuntimeError('Desktop session closed during audio setup.')
                 self.owner.media_devices.nonblocking_track_stop(audio);self.audio_track=audio
                 self.audio_sender=pc.addTrack(audio);self.audio_sender._enabled=False
+                install_media_encoder(self.audio_sender)
                 independent_media_sender(self.audio_sender,cnames['audio']);self.audio_error=None
             except Exception as error:self.audio_error=str(error);print(json.dumps({'desktopAudioError':str(error)}),flush=True)
         if self.closed:raise RuntimeError('Desktop session closed during media setup.')
@@ -529,7 +541,7 @@ class DesktopSession:
                     self.last_activity=time.monotonic()
                     if event.get('type')=='ping':
                         self.report_receiver(event)
-                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'videoEnabled':self.video_enabled,'videoDiagnostics':self.video_diagnostics(),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error,'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
+                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'videoEnabled':self.video_enabled,'videoDiagnostics':self.video_diagnostics(),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error or getattr(self.audio_track,'error',None),'audioCaptureRecoveries':getattr(self.audio_track,'recoveries',0),'microphoneError':getattr(self.mic_sink,'error',None),'microphoneRecoveries':getattr(self.mic_sink,'recoveries',0),'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
                     elif event.get('type')=='videoState':
                         if isinstance(event.get('enabled'),bool):self.set_video_enabled(event['enabled'])
                     elif event.get('type')=='settings':
@@ -641,7 +653,7 @@ class DesktopSession:
 class DesktopAgent:
     def __init__(self):
         self.display,device_index,output_index=capture_target()
-        self.camera=dxcam.create(device_idx=device_index,output_idx=output_index,output_color='BGRA',max_buffer_len=2,processor_backend='numpy')
+        self.camera=RecoveringCamera(lambda:dxcam.create(device_idx=device_index,output_idx=output_index,output_color='BGRA',max_buffer_len=2,processor_backend='numpy'),log=lambda event:print(json.dumps(event),flush=True))
         self.input=RemoteInput();self.sessions=[];self.closed=False
         self.input.bounds=tuple(self.display['bounds']);self.input.touch.bounds=self.input.bounds
         self.source_width=self.display['bounds'][2];self.source_height=self.display['bounds'][3]
