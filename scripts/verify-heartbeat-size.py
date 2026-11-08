@@ -27,6 +27,7 @@ session.video_diagnostics=lambda:{'encoderWorker':{'failed':0},'capture':{'recov
 with patch('rtc_agent.displays',return_value=[session.owner.display]):
     detailed=json.loads(session.pong({'time':12,'diagnostics':True}))
 assert detailed['videoDiagnostics']['encoderWorker']['failed']==0 and detailed['displays']
+assert detailed['display']['mode']=='virtual' and detailed['display']['height']==1080
 assert detailed['audioCaptureRecoveries']==1 and detailed['microphoneRecoveries']==2
 session.audio_error='Audio endpoint unavailable';session.input.error='Input unavailable'
 with patch('rtc_agent.displays',side_effect=AssertionError('No blocking enumeration')):

@@ -1,11 +1,36 @@
 """Low-latency Windows speaker loopback. No microphone is opened."""
-import asyncio, fractions, queue,time,threading
+import asyncio, fractions, queue,time,threading,ctypes
 from concurrent.futures import ThreadPoolExecutor
 import av, numpy as np
 import pyaudiowpatch as pyaudio
 from aiortc import MediaStreamTrack
 from aiortc.codecs.opus import OpusEncoder
 from audio_buffer import LatestAudioFrames,PcmPlaybackBuffer
+
+
+class AudioComApartment:
+    """WASAPI needs COM on every calling thread, not only the first PyAudio.
+
+    PortAudio initialization is process-global. A second PyAudio instance can
+    therefore skip its COM setup when it is created on another worker. Own
+    one explicit COM reference for this worker's whole device lifetime.
+    """
+    def __init__(self):
+        self.thread=None;self.owned=False
+        self.ole=ctypes.WinDLL('ole32')
+        self.ole.CoInitializeEx.argtypes=[ctypes.c_void_p,ctypes.c_uint32]
+        self.ole.CoInitializeEx.restype=ctypes.c_int32
+        self.ole.CoUninitialize.argtypes=[];self.ole.CoUninitialize.restype=None
+    def open(self):
+        result=self.ole.CoInitializeEx(None,0)  # COINIT_MULTITHREADED
+        if result<0 and result!=-2147417850:  # RPC_E_CHANGED_MODE: existing STA
+            raise OSError('Audio worker COM initialization failed: 0x'+format(result&0xffffffff,'08x'))
+        self.thread=threading.get_ident();self.owned=result>=0
+    def close(self):
+        if self.owned:
+            if threading.get_ident()!=self.thread:raise RuntimeError('Audio COM cleanup must stay on its owning thread')
+            self.ole.CoUninitialize();self.owned=False
+
 
 class TimelineOpusEncoder(OpusEncoder):
     """Keep a capture gap from generating an extra stale RTP timestamp."""
@@ -40,13 +65,34 @@ class TimelineOpusEncoder(OpusEncoder):
 class DesktopAudioTrack(MediaStreamTrack):
     kind='audio'
     def __init__(self):
-        super().__init__();self.audio=None;self.stream=None;self.closed=False;self.error=None;self.recoveries=0
+        super().__init__();self.audio=None;self.stream=None;self.closed=False;self.error=None;self.recoveries=0;self.independent=False
         self.frames=queue.Queue(maxsize=2);self.timestamp=0;self.started=time.monotonic();self.capture_position=0;self.generation=0
         self.lifecycle_lock=threading.Lock();self.last_capture=self.started;self.next_recovery=0
+        self.device_thread=None;self.apartment=None
         self.reader=ThreadPoolExecutor(max_workers=1,thread_name_prefix='DesktopAudioRead')
-        try:self._open_capture()
+        try:self.reader.submit(self._start_capture).result()
         except BaseException:
-            self.closed=True;self._close_capture();self.reader.shutdown(wait=False,cancel_futures=True);raise
+            self.closed=True
+            try:self.reader.submit(self._shutdown_capture).result()
+            finally:self.reader.shutdown(wait=False,cancel_futures=True)
+            raise
+    def _start_capture(self):
+        self.device_thread=threading.get_ident()
+        self.apartment=AudioComApartment();self.apartment.open()
+        try:self._open_capture()
+        except Exception as error:
+            # Keep the negotiated audio track alive through endpoint startup
+            # failures. Previously one transient open error omitted the audio
+            # sender for the entire session, so later recovery never ran.
+            self.error=type(error).__name__+': '+str(error)
+            try:self._close_capture()
+            except Exception:pass
+            self.last_capture=self.started-2
+    def _shutdown_capture(self):
+        try:
+            with self.lifecycle_lock:self._close_capture()
+        finally:
+            if self.apartment:self.apartment.close()
     def _open_capture(self):
         self.audio=pyaudio.PyAudio()
         devices=list(self.audio.get_device_info_generator())
@@ -84,6 +130,9 @@ class DesktopAudioTrack(MediaStreamTrack):
         finally:
             if audio:audio.terminate()
     def _recover_capture(self):
+        if self.closed:return
+        if threading.get_ident()!=self.device_thread:
+            return self.reader.submit(self._recover_capture).result()
         if time.monotonic()<self.next_recovery:return
         with self.lifecycle_lock:
             if self.closed:return
@@ -127,7 +176,8 @@ class DesktopAudioTrack(MediaStreamTrack):
         if self.closed:return
         self.closed=True;super().stop()
         try:
-            with self.lifecycle_lock:self._close_capture()
+            if threading.get_ident()==self.device_thread:self._shutdown_capture()
+            else:self.reader.submit(self._shutdown_capture).result()
         finally:self.reader.shutdown(wait=False,cancel_futures=True)
 
 def virtual_microphone_device(audio):
@@ -140,10 +190,12 @@ class MicrophoneSink:
     def __init__(self):
         self.audio=None;self.device=None;self.stream=None;self.closed=False;self.error=None;self.recoveries=0
         self.frames=LatestAudioFrames(3);self.playback=None;self.retry_at=0;self.retry_delay=.1;self.last_frame_time=None
+        self.output_generation=0;self.last_callback=0;self.callback_stalls=0;self.callback_statuses=0
         # All resampling and PortAudio ownership stays on one dedicated
         # thread. A slow device cannot stall the receiver or video executor.
         self.worker=threading.Thread(target=self._run,name='VirtualMicrophone',daemon=True);self.worker.start()
     def _close_output(self):
+        self.output_generation+=1
         stream,self.stream=self.stream,None;audio,self.audio=self.audio,None
         self.device=None
         try:
@@ -157,19 +209,31 @@ class MicrophoneSink:
         self.playback=PcmPlaybackBuffer(round(self.rate*.04)*self.channels*2,self.channels*2)
         self.resampler=av.AudioResampler(format='s16',layout='stereo' if self.channels==2 else 'mono',rate=self.rate)
         self.last_frame_time=None
-        playback=self.playback
+        self.output_generation+=1;generation=self.output_generation
+        playback=self.playback;channels=self.channels;self.last_callback=time.monotonic()
         def callback(data,frame_count,time_info,status):
-            if self.closed:return (bytes(frame_count*self.channels*2),pyaudio.paComplete)
+            # A delayed callback from a removed endpoint must neither drain
+            # fresh PCM nor make a new, stalled endpoint appear healthy.
+            if self.closed or generation!=self.output_generation:return (bytes(frame_count*channels*2),pyaudio.paComplete)
+            self.last_callback=time.monotonic()
+            if status:self.callback_statuses+=1
             return (playback.read(frame_count),pyaudio.paContinue)
         self.stream=self.audio.open(format=pyaudio.paInt16,channels=self.channels,rate=self.rate,output=True,output_device_index=int(self.device['index']),frames_per_buffer=max(1,self.rate//200),stream_callback=callback)
         self.retry_delay=.1;self.error=None;self.recoveries+=1
     def _run(self):
-        dropped=0
+        dropped=0;apartment=None
         try:
+            apartment=AudioComApartment();apartment.open()
             while not self.closed:
                 frame=self.frames.get(.1)
                 try:
                     if self.stream and not self.stream.is_active():raise OSError('Virtual microphone playback stopped')
+                    # Some WASAPI failures keep reporting active after the
+                    # callbacks have stopped. Previously that left a live
+                    # receiver feeding a permanently silent output forever.
+                    if self.stream and time.monotonic()-self.last_callback>1:
+                        self.callback_stalls+=1
+                        raise OSError('Virtual microphone playback callbacks stalled')
                     if not self.stream:
                         if time.monotonic()<self.retry_at:continue
                         self._open_output()
@@ -186,9 +250,11 @@ class MicrophoneSink:
                     try:self._close_output()
                     except Exception:pass
                     self.retry_at=time.monotonic()+self.retry_delay;self.retry_delay=min(2,self.retry_delay*2)
+        except Exception as error:self.error=type(error).__name__+': '+str(error)
         finally:
             try:self._close_output()
             except Exception:pass
+            if apartment:apartment.close()
     async def consume(self,track):
         try:
             while not self.closed:

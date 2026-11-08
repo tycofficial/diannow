@@ -1,9 +1,10 @@
 """Select a real DXGI desktop; never interpolate a 60Hz source into fake 120fps."""
-import ctypes as c,json,os
+import ctypes as c,json,os,tempfile,threading
 from ctypes import wintypes as w
 from pathlib import Path
 
 STATE=Path(os.environ['LOCALAPPDATA'])/'CodexDesktopViewer'/'desktop-service'
+PREFERENCE_LOCK=threading.Lock()
 class DISPLAY_DEVICE(c.Structure):
     _fields_=[('cb',w.DWORD),('DeviceName',w.WCHAR*32),('DeviceString',w.WCHAR*128),('StateFlags',w.DWORD),('DeviceID',w.WCHAR*128),('DeviceKey',w.WCHAR*128)]
 class DEVMODE(c.Structure):
@@ -23,6 +24,8 @@ def displays():
     return result
 
 def activate_virtual(width=1920,height=1080,refresh=120):
+    # Driver setup may call this to prepare a monitor. Selecting that monitor
+    # for remote capture is a separate, explicit set_preference('virtual').
     if (width,height) not in [(1280,720),(1920,1080),(3840,2160)] or refresh not in [60,120]:raise ValueError('Unsupported virtual display mode')
     api=c.windll.user32;items=displays();target=next((d for d in items if d['virtual']),None)
     if not target:raise RuntimeError('The signed virtual display driver has not created a monitor yet.')
@@ -38,25 +41,48 @@ def activate_virtual(width=1920,height=1080,refresh=120):
     if code!=0:raise RuntimeError(f'Windows rejected the virtual 120Hz mode ({code}).')
     code=api.ChangeDisplaySettingsExW(target['name'],c.byref(mode),None,1,None)
     if code!=0:raise RuntimeError(f'Windows could not activate the virtual display ({code}).')
-    set_preference('virtual');return displays()
+    return displays()
 
 def set_preference(mode):
     if mode not in ['original','virtual']:raise ValueError('Unknown display preference')
-    STATE.mkdir(parents=True,exist_ok=True);path=STATE/'display-preference.json';temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps({'mode':mode}),encoding='utf-8');temporary.replace(path)
+    with PREFERENCE_LOCK:
+        STATE.mkdir(parents=True,exist_ok=True);path=STATE/'display-preference.json';temporary=None
+        try:
+            # Concurrent viewers must not replace/delete each other's temporary
+            # file. The final preference is still one complete atomic document.
+            with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=STATE,prefix='display-preference-',suffix='.tmp',delete=False) as output:
+                temporary=Path(output.name);json.dump({'mode':mode},output)
+            temporary.replace(path)
+        finally:
+            if temporary:temporary.unlink(missing_ok=True)
+
+def get_preference():
+    with PREFERENCE_LOCK:
+        try:value=json.loads((STATE/'display-preference.json').read_text(encoding='utf-8'))
+        except (OSError,ValueError):return 'original'
+    return 'virtual' if isinstance(value,dict) and value.get('mode')=='virtual' else 'original'
+
+def select_capture_display(items,preference='original'):
+    active=[item for item in items if item['attached'] and item['bounds'][2]>0 and item['bounds'][3]>0]
+    if preference=='virtual':
+        target=next((item for item in active if item['virtual']),None)
+        if target:return target
+    # A virtual monitor can itself be marked primary by Windows. "Original"
+    # means a physical desktop, so never fall back to an arbitrary primary.
+    physical=[item for item in active if not item['virtual']]
+    target=next((item for item in physical if item['primary']),None)
+    if target:return target
+    if physical:return physical[0]
+    raise RuntimeError('Windows does not expose an attached physical desktop. Select virtual display explicitly to capture a virtual monitor.')
 
 def capture_target():
-    items=displays()
-    try:preference=json.loads((STATE/'display-preference.json').read_text(encoding='utf-8')).get('mode')
-    except (OSError,ValueError):preference='original'
-    target=next((d for d in items if d['virtual'] and d['attached']),None) if preference=='virtual' else None
-    target=target or next((d for d in items if d['primary']),None)
-    if not target:raise RuntimeError('Windows does not expose an active desktop.')
+    target=select_capture_display(displays(),get_preference())
     from dxcam.util.io import enum_dxgi_adapters,enum_dxgi_outputs
     from dxcam._libs.dxgi import DXGI_OUTPUT_DESC
     for device_index,adapter in enumerate(enum_dxgi_adapters()):
         for output_index,output in enumerate(enum_dxgi_outputs(adapter)):
             description=DXGI_OUTPUT_DESC();output.GetDesc(c.byref(description))
-            if description.DeviceName==target['name']:
+            if description.DeviceName==target['name'] and description.AttachedToDesktop:
                 return target,device_index,output_index
     raise RuntimeError('The selected monitor is not available to DXGI capture.')
 

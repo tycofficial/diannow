@@ -1,6 +1,7 @@
 """Bound TURN/TCP video backlog while leaving control and audio responsive."""
 import asyncio,socket,time,json
 from rtp_scheduling import PacketPacer
+from repair_headroom import RepairHeadroom
 
 def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sender=None):
     existing=getattr(dtls,'_turn_video_flow',None)
@@ -9,7 +10,10 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
         if video_sender is not None:existing['videoSenders'].append(video_sender)
         return existing
     state={'videoPayloadTypes':set(video_payload_types),'videoSenders':[video_sender] if video_sender is not None else [],'waits':0,'skippedStaleRetransmits':0,'maxQueuedBytes':0,'configuredWriters':set(),'lastLog':0.0,'nextPacketAt':0.0,'audioEnabled':False,'pacingBitsPerSecond':0,'relayed':False,'minimumRtt':None,'congestedUntil':0.0}
-    dtls._turn_video_flow=state;original=dtls._send_rtp;pacer=PacketPacer()
+    # This wrapper already keeps congestion active for ten seconds. Do not
+    # append a second ten-second hold after that window in the repair policy.
+    dtls._turn_video_flow=state;original=dtls._send_rtp;pacer=PacketPacer();headroom=RepairHeadroom(clock=time.monotonic,hold_seconds=0)
+    state.update(primaryWireBytes=0,repairWireBytes=0,repairBlockReason='no-feedback')
     def queue_size():
         queued=0
         for pair in dtls.transport._connection._nominated.values():
@@ -31,7 +35,8 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
         state['maxQueuedBytes']=max(state['maxQueuedBytes'],queued)
         return queued
     async def send(data):
-        if len(data)>=2 and (data[1]&127) in state['videoPayloadTypes']:
+        is_video=len(data)>=2 and (data[1]&127) in state['videoPayloadTypes'];repair=False
+        if is_video:
             # RTCP NACK handling runs inside the DTLS receive loop. Waiting
             # there blocks incoming keyboard, pointer and SCTP ACK packets.
             # Original video and the owned repair worker may wait. Unexpected
@@ -57,7 +62,15 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
                 if isinstance(rtt,(int,float)) and 0<rtt<60:state['minimumRtt']=min(state['minimumRtt'] or rtt,rtt)
                 delivery=getattr(encoder,'delivery',None)
                 buffered=getattr(delivery,'last_buffer',None)
-                queued=(isinstance(rtt,(int,float)) and (rtt>1.5 or state['minimumRtt'] is not None and rtt-state['minimumRtt']>.075)) or (isinstance(buffered,(int,float)) and buffered>=150)
+                feedback_at=getattr(delivery,'last_feedback',None)
+                feedback_fresh=isinstance(feedback_at,(int,float)) and 0<=time.monotonic()-feedback_at<=5
+                # Loss recovery itself enlarges playout delay on a distant
+                # route. Only sustained growth indicates a growing queue for
+                # a fixed profile; a constant 600ms playout delay is not a
+                # measurement of the link's bandwidth.
+                buffer_queue=feedback_fresh and isinstance(buffered,(int,float)) and buffered>=150 and (not fixed or getattr(delivery,'buffer_growth_streak',0)>=2)
+                rtt_queue=isinstance(rtt,(int,float)) and (rtt>1.5 or state['minimumRtt'] is not None and rtt-state['minimumRtt']>max(.075,state['minimumRtt']*.25 if fixed else 0))
+                queued=rtt_queue or buffer_queue
                 now=time.perf_counter()
                 if queued:state['congestedUntil']=now+10
                 queued=queued or now<state['congestedUntil']
@@ -66,10 +79,18 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
                 # confirms an actual queue. Audio is already reflected by
                 # receiver bandwidth feedback; do not subtract it twice.
                 budget=max(96000,min(40000000,estimate*1.15)) if fixed else max(96000,min(8000000,estimate*1.1 if queued else max(900000,estimate*1.1)))
+                if fixed:
+                    budget=min(40000000,headroom.budget(estimate,budget,congested=queued,feedback_fresh=feedback_fresh))
+                    state.update(headroom.state)
+                    state['repairBlockReason']='rtt-growth' if rtt_queue else 'buffer-growth' if buffer_queue else 'congestion-hold' if queued else 'no-feedback' if not feedback_fresh else 'none'
                 if encoder is not None:encoder.capacity_bitrate=max(350000,round(budget/1.1))
                 state['pacingBitsPerSecond']=round(budget)
                 await pacer.wait(len(data)+64,budget)
                 state['nextPacketAt']=pacer.next_at
         await original(data)
+        if is_video:
+            wire_bytes=len(data)+64
+            state['repairWireBytes' if repair else 'primaryWireBytes']+=wire_bytes
+            if repair:headroom.record_repair(wire_bytes)
     dtls._send_rtp=send
     return state

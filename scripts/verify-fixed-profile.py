@@ -13,6 +13,10 @@ for second in range(1,180):
     policy.observe(64000,now=second)
     policy.receiver_feedback({'lossDelta':40,'bufferMs':1000,'viewerVisible':1},now=second)
     assert policy.fps==policy.max_fps==60 and policy.reason=='fixed-profile'
+assert policy.last_feedback==179 and policy.last_buffer==1000
+policy.receiver_feedback({'bufferMs':float('inf'),'viewerVisible':1},now=180)
+policy.receiver_feedback({'bufferMs':10,'viewerVisible':0},now=181)
+assert policy.last_feedback==179 and policy.last_buffer==1000
 
 class CodecDouble:
     name='h264_amf'

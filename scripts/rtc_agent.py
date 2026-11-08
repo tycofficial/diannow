@@ -16,8 +16,10 @@ from aiortc.codecs.h264 import H264Encoder
 import aiortc.codecs, aiortc.rtcrtpsender
 from remote_input import RemoteInput
 from desktop_audio import DesktopAudioTrack, MicrophoneSink, TimelineOpusEncoder
+from audio_receiver import install_audio_receive_buffers
 from audio_routing import AudioRouter
 from display_target import capture_target,displays,set_preference,activate_virtual,STATE as DISPLAY_STATE
+from display_switch import DisplaySwitchCoordinator
 from low_latency_rtp import configure_video_playout_delay
 from rtp_scheduling import install_cooperative_rtp_send
 from rtp_send_time import install_rtp_send_time
@@ -33,6 +35,7 @@ from media_encoder import install_media_encoder
 from video_retransmission import install_video_retransmission
 from bitrate_stability import BitrateStability
 from stream_profile import stream_dimensions, stream_bitrate
+from session_state import SessionStateGate
 
 ROOT=Path(__file__).resolve().parent.parent
 ctypes.windll.user32.SetProcessDPIAware()
@@ -106,7 +109,7 @@ def independent_media_description(description,cnames):
 class DeliveryPolicy:
     def __init__(self,max_fps,fixed=False):
         self.max_fps=max_fps;self.fps=max_fps;self.fixed=bool(fixed);self.bandwidth=14000000;self.frame_bytes=0;self.updated=0
-        self.last_feedback=None;self.last_buffer=None;self.congestion_streak=0;self.reason='fixed-profile' if self.fixed else 'target-no-confirmed-congestion'
+        self.last_feedback=None;self.last_buffer=None;self.congestion_streak=0;self.buffer_growth_streak=0;self.reason='fixed-profile' if self.fixed else 'target-no-confirmed-congestion'
     def observe(self,size,now=None):
         self.frame_bytes=size if not self.frame_bytes else self.frame_bytes*.96+size*.04
         if self.fixed:return
@@ -116,7 +119,6 @@ class DeliveryPolicy:
         if self.fps<self.max_fps and now-self.updated>=5 and (self.last_feedback is None or now-self.last_feedback>=5):
             self.fps=min(self.max_fps,self.fps+5);self.updated=now;self.reason='probe-without-recent-congestion-feedback'
     def receiver_feedback(self,report,now=None):
-        if self.fixed:return
         now=time.monotonic() if now is None else now
         # Hidden mobile pages throttle decoding/presentation. Their stale
         # buffer is not evidence that the active network needs a lower FPS.
@@ -126,8 +128,12 @@ class DeliveryPolicy:
         if not number(buffer) or buffer<0:return
         lost=number(loss) and loss>0
         growing=self.last_buffer is not None and buffer-self.last_buffer>=15
+        self.buffer_growth_streak=self.buffer_growth_streak+1 if growing and self.last_feedback is not None and now-self.last_feedback<=5 else 0
         congested=buffer>=250 or (lost and (growing or buffer>=80))
         self.last_feedback=now;self.last_buffer=buffer
+        # Fixed profiles still need queue observations for transport repair
+        # pacing. Recording feedback must never change their FPS or bitrate.
+        if self.fixed:return
         self.congestion_streak=self.congestion_streak+1 if congested else 0
         if self.congestion_streak>=2 and now-self.updated>=4:
             floor=min(self.max_fps,20)
@@ -419,21 +425,28 @@ class DesktopSession:
         self.pc=None;self.track=None;self.audio_track=None;self.mic_sink=None;self.mic_task=None;self.closed=False;self.audio_error=None;self.move_sequence=0
         self.session_id=session_id or str(uuid.uuid4());self.created_at=time.monotonic();self.last_activity=self.created_at;self.watchdog=None;self.answer_result=None;self.close_task=None
         self.fps_samples=deque();self.last_report_log=0;self.video_enabled=True
+        self.state_gate=SessionStateGate()
+        self.display_tasks=set();self.legacy_display_request=0
     def recent_fps(self,track,now=None):
         now=time.perf_counter() if now is None else now
-        self.fps_samples.append((now,track.sent))
-        while len(self.fps_samples)>1 and self.fps_samples[0][0]<now-5:self.fps_samples.popleft()
-        started,count=self.fps_samples[0];elapsed=now-started
-        return round((track.sent-count)/elapsed,1) if elapsed>0 else 0
+        # Measure frame delivery, not heartbeat arrival. A lost / delayed
+        # status packet must not turn a healthy sender into a reported 0 FPS.
+        # Include idle time since the last frame so a real stall is visible.
+        samples=[sample for sample in getattr(track,'frame_samples',()) if now-5<=sample[0]<=now]
+        if len(samples)<2:return 0
+        started,count=samples[0];elapsed=now-started
+        return round((samples[-1][1]-count)/elapsed,1) if elapsed>0 else 0
     def pong(self,event):
         # Heartbeats share the reliable input stream. Keep routine replies in
         # one SCTP fragment; several KiB of unused diagnostics force every
         # later acknowledgement to wait for a lost status fragment.
         track=self.track
-        value={'type':'pong','time':event.get('time'),'sent':track.sent,
+        value={'type':'pong','time':event.get('time'),'sent':track.sent,'stateProtocol':1,'displayProtocol':1,
                'fps':self.recent_fps(track),'videoEnabled':self.video_enabled,
                'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible',
-               'cursor':self.input.cursor(),'display':{'virtual':bool(self.owner.display.get('virtual'))},
+               'cursor':self.input.cursor(),'display':{'virtual':bool(self.owner.display.get('virtual')),
+                   'mode':'virtual' if self.owner.display.get('virtual') else 'original',
+                   'width':self.source_width,'height':self.source_height,'name':self.owner.display.get('name')},
                'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},
                'stream':{'width':track.width,'height':track.height,'fps':track.fps},
                'audio':self.audio_track is not None,
@@ -444,9 +457,12 @@ class DesktopSession:
                'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],
                'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}
         if event.get('diagnostics') is True:
-            value.update(videoDiagnostics=self.video_diagnostics(),display=self.owner.display,displays=displays(),
+            value.update(videoDiagnostics=self.video_diagnostics(),display={**self.owner.display,**value['display']},displays=displays(),
                          audioCaptureRecoveries=getattr(self.audio_track,'recoveries',0),
                          microphoneRecoveries=getattr(self.mic_sink,'recoveries',0))
+            receiver_buffers=getattr(self,'microphone_buffers',None)
+            if receiver_buffers is not None:value['microphoneBuffers']=receiver_buffers.stats
+            value['microphoneCallbackStalls']=getattr(self.mic_sink,'callback_stalls',0)
         return json.dumps({key:item for key,item in value.items() if item is not None},separators=(',',':'))
     def report_receiver(self,event,now=None):
         now=time.monotonic() if now is None else now
@@ -455,7 +471,10 @@ class DesktopSession:
         fields=['fps','receivedFps','presentedFps','bufferMs','lossDelta','decodeMs','mbps','inputAckMs','inputAckAgeMs','audioRms','audioEnabled','audioContextState','audioOutputMode','audioElementMuted','audioBufferMs','audioTotalSamplesDuration','audioTotalSamplesReceived','audioConcealedSamplesDelta','audioTotalPlayoutDelay','audioTotalSamplesCount','audioPlayoutMs','audioPlayoutSamplesDuration','audioBaseLatencyMs','audioOutputLatencyMs','videoDecodedDelta','videoReceivedDelta','videoPresentedDelta','videoPresentationSource','videoPresentationAgeMs','viewerVisible','videoPaused','videoRequestedEnabled','videoKeyFramesDelta','videoPliDelta','videoNackDelta','videoFreezeDelta','videoDroppedDelta','playbackFramesDelta','playbackDroppedDelta']
         values={key:value for key in fields if isinstance(value:=report.get(key),(int,float)) and not isinstance(value,bool) and math.isfinite(value)}
         requested=values.get('videoRequestedEnabled',values.get('viewerVisible'))
-        if requested in (0,1):self.set_video_enabled(bool(requested))
+        # Old heartbeats can arrive after a newer declarative playback state.
+        # Keep the legacy signal only until this session uses versioned state.
+        gate=getattr(self,'state_gate',None)
+        if requested in (0,1) and (gate is None or gate.allows_legacy({'type':'videoState'})):self.set_video_enabled(bool(requested))
         if getattr(self,'track',None):self.track.delivery.receiver_feedback(values,now=now)
         if now-self.last_report_log<5:return
         if values:
@@ -486,7 +505,7 @@ class DesktopSession:
         send_time=getattr(sender,'_desktop_rtp_send_time',None)
         if send_time is not None:result['sendTime']=dict(send_time.state)
         flow=getattr(self,'turn_flow',None)
-        if flow is not None:result['pacing']={key:flow.get(key) for key in ('pacingBitsPerSecond','waits','maxQueuedBytes','skippedStaleRetransmits')}
+        if flow is not None:result['pacing']={key:flow.get(key) for key in ('pacingBitsPerSecond','waits','maxQueuedBytes','skippedStaleRetransmits','primaryWireBytes','repairWireBytes','repairWireBitsPerSecond','repairHeadroomBitsPerSecond','repairHeadroomBlocked','repairBlockReason')}
         rtt=getattr(sender,'_RTCRtpSender__rtt',None)
         if isinstance(rtt,(int,float)):result['videoRttMs']=round(rtt*1000,2)
         return result
@@ -510,6 +529,36 @@ class DesktopSession:
         track=getattr(self,'track',None)
         pc=getattr(self,'pc',None)
         if track is not None:track.set_streaming(enabled and pc is not None and pc.connectionState=='connected')
+    def apply_state(self,event):
+        kind=event['type']
+        if kind=='settings':
+            track=self.track
+            track.width,track.height=stream_dimensions(self.source_width,self.source_height,event.get('quality','480'))
+            track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))))
+            track.fixed_profile=event.get('fixedProfile',track.fixed_profile) is True
+            track.delivery=DeliveryPolicy(track.fps,fixed=track.fixed_profile)
+            self.owner.ensure_capture_rate(track.fps)
+        elif kind=='videoState' and isinstance(event.get('enabled'),bool):self.set_video_enabled(event['enabled'])
+        elif kind=='microphoneState':self.owner.audio_router.set_microphone(self.session_id,bool(event.get('enabled')))
+        elif kind=='audioState' and getattr(self,'audio_sender',None):
+            self.audio_sender._enabled=bool(event.get('enabled'))
+            if getattr(self,'turn_flow',None):self.turn_flow['audioEnabled']=self.audio_sender._enabled
+    async def change_display(self,event,channel):
+        manager=self.owner.display_switch
+        reply=await manager.request(self.session_id,event,self.owner.display)
+        def acknowledge(value):
+            try:
+                if channel.readyState=='open':channel.send(json.dumps(value,separators=(',',':')))
+            except Exception as error:print(json.dumps({'displayAckError':type(error).__name__}),flush=True)
+        acknowledge(reply)
+        if manager.claim_restart(self.session_id,event.get('requestId')):
+            # This acknowledges accepted/persisted intent, not a new frame.
+            # The next connection reports the actual newly captured display.
+            await asyncio.sleep(.25)
+            try:await asyncio.to_thread((DISPLAY_STATE/'restart.request').touch)
+            except Exception as error:
+                manager.restart_failed(self.session_id,event.get('requestId'),error)
+                acknowledge({**reply,'error':str(error)[:240]})
     def media_failure(self,now=None):
         """A live data channel cannot keep a dead video sender alive forever."""
         if self.closed or not self.pc or self.pc.connectionState!='connected' or not getattr(self,'video_enabled',True):
@@ -565,7 +614,10 @@ class DesktopSession:
         except Exception as error:print(json.dumps({'microphoneSetupError':type(error).__name__,'message':str(error)}),flush=True)
         @pc.on('track')
         def on_remote_track(remote_track):
-            if remote_track.kind=='audio' and self.mic_sink:self.mic_task=asyncio.create_task(self.mic_sink.consume(remote_track))
+            if remote_track.kind=='audio':
+                receiver=next(item for item in pc.getReceivers() if item.track is remote_track)
+                self.microphone_buffers=install_audio_receive_buffers(receiver)
+                if self.mic_sink:self.mic_task=asyncio.create_task(self.mic_sink.consume(remote_track))
         for transceiver in pc.getTransceivers():
             if transceiver.kind=='video':transceiver.setCodecPreferences(video_codec_preferences())
         @pc.on('datachannel')
@@ -580,35 +632,32 @@ class DesktopSession:
                 try:
                     event=json.loads(message)
                     self.last_activity=time.monotonic()
+                    if event.get('type')=='sessionState':
+                        acknowledgement=self.state_gate.handle(event,self.apply_state)
+                        channel.send(json.dumps(acknowledgement,separators=(',',':')))
+                        return
+                    if not self.state_gate.allows_legacy(event):return
                     if event.get('type')=='ping':
                         self.report_receiver(event)
                         channel.send(self.pong(event))
-                    elif event.get('type')=='videoState':
-                        if isinstance(event.get('enabled'),bool):self.set_video_enabled(event['enabled'])
-                    elif event.get('type')=='settings':
-                        track.width,track.height=stream_dimensions(self.source_width,self.source_height,event.get('quality','480'))
-                        track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.fixed_profile=event.get('fixedProfile',track.fixed_profile) is True;track.delivery=DeliveryPolicy(track.fps,fixed=track.fixed_profile)
-                        self.owner.ensure_capture_rate(track.fps)
+                    elif event.get('type') in SessionStateGate.TYPES:self.apply_state(event)
                     elif event.get('type')=='display' and event.get('mode') in ['original','virtual']:
-                        if event['mode']=='virtual' and not any(d['virtual'] and d['attached'] for d in displays()):raise RuntimeError('Virtual display not ready')
-                        async def change_display():
-                            try:
-                                if event['mode']=='virtual':
-                                    width,height=(3840,2160) if event.get('resolution')=='2160' else (1920,1080)
-                                    await asyncio.to_thread(activate_virtual,width,height,120)
-                                set_preference(event['mode']);(DISPLAY_STATE/'restart.request').touch()
-                            except Exception as error:input_result(event.get('id'),str(error))
-                        asyncio.create_task(change_display())
+                        if 'requestId' not in event:
+                            self.legacy_display_request+=1
+                            event={**event,'requestId':self.legacy_display_request}
+                        task=asyncio.create_task(self.change_display(event,channel))
+                        self.display_tasks.add(task)
+                        def completed_display(result):
+                            self.display_tasks.discard(result)
+                            if not result.cancelled() and result.exception() is not None:
+                                print(json.dumps({'displaySwitchError':str(result.exception())}),flush=True)
+                        task.add_done_callback(completed_display)
                     elif event.get('type')=='video-recover':
                         now=time.monotonic()
                         if now-self.last_keyframe_request>=2:
                             self.last_keyframe_request=now;self.video_sender._send_keyframe()
                             print(json.dumps({'sessionId':self.session_id,'videoRecovery':'keyframe-requested'}),flush=True)
                     elif event.get('type')=='disconnect':asyncio.create_task(self.close('viewer-request'))
-                    elif event.get('type')=='microphoneState':self.owner.audio_router.set_microphone(self.session_id,bool(event.get('enabled')))
-                    elif event.get('type')=='audioState' and getattr(self,'audio_sender',None):
-                        self.audio_sender._enabled=bool(event.get('enabled'))
-                        if getattr(self,'turn_flow',None):self.turn_flow['audioEnabled']=self.audio_sender._enabled
                     else:
                         if event.get('type') in ['move','button'] and event.get('seq'):
                             sequence=int(event['seq'])
@@ -688,6 +737,7 @@ class DesktopSession:
         if self.track:self.track.stop();self.track=None
         debug('track-stopped')
         if self.pc:pc=self.pc;self.pc=None;await pc.close()
+        if getattr(self.owner,'display_switch',None):self.owner.display_switch.forget_owner(self.session_id)
         debug('peer-closed')
         if self in self.owner.sessions:self.owner.sessions.remove(self)
         self.owner.update_input_state()
@@ -697,6 +747,16 @@ class DesktopSession:
 class DesktopAgent:
     def __init__(self):
         self.display,device_index,output_index=capture_target()
+        print(json.dumps({'captureDisplay':self.display,'captureDevice':device_index,'captureOutput':output_index}),flush=True)
+        async def refresh_displays():return await asyncio.to_thread(displays)
+        async def apply_display(mode,resolution,changed):
+            def apply():
+                if mode=='virtual' and changed:
+                    width,height=(3840,2160) if resolution=='2160' else (1920,1080)
+                    activate_virtual(width,height,120)
+                set_preference(mode)
+            await asyncio.to_thread(apply)
+        self.display_switch=DisplaySwitchCoordinator(refresh=refresh_displays,apply=apply_display)
         self.camera=RecoveringCamera(lambda:dxcam.create(device_idx=device_index,output_idx=output_index,output_color='BGRA',max_buffer_len=2,processor_backend='numpy'),log=lambda event:print(json.dumps(event),flush=True))
         self.input=RemoteInput();self.sessions=[];self.closed=False
         self.input.bounds=tuple(self.display['bounds']);self.input.touch.bounds=self.input.bounds
@@ -765,6 +825,7 @@ async def run_agent():
             app=web.Application()
             async def page(request):
                 content=(ROOT/'web'/'viewer.html').read_text(encoding='utf-8').replace('//__GESTURES__',(ROOT/'web'/'gestures.mjs').read_text(encoding='utf-8').replace('export class','class'))
+                content=content.replace('//__SESSION_STATE__',(ROOT/'web'/'session-state.mjs').read_text(encoding='utf-8').replace('export class','class'))
                 return web.Response(text=content,content_type='text/html')
             async def offer(request):return web.json_response(await agent.answer(await request.json()))
             app.router.add_get('/',page);app.router.add_post('/api/offer',offer)

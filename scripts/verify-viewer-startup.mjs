@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 
-const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(await readFile('web/gestures.mjs','utf8')).replaceAll('export class','class'));
+const html=(await readFile('web/viewer.html','utf8')).replace('//__GESTURES__',(await readFile('web/gestures.mjs','utf8')).replaceAll('export class','class')).replace('//__SESSION_STATE__',(await readFile('web/session-state.mjs','utf8')).replaceAll('export class','class'));
 assert.match(html,/<option value="480" selected>/,'The actual initial HTML selection must request 480P');
 assert.doesNotMatch(html,/<option value="1080" selected>/);
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
@@ -20,7 +20,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
     iceGatheringState='complete';connectionState='new';
     remoteDescriptions=0;
     constructor(config){this.config=config;peers.push(this)}
-    createDataChannel(label){const channel={label,readyState:'open',bufferedAmount:0,send(value){if(channel.fail)throw new Error('Data channel failed');sent.push(JSON.parse(value))}};channels.push(channel);return channel}
+    createDataChannel(label,options){const channel={label,options,readyState:'open',bufferedAmount:0,send(value){if(channel.fail)throw new Error('Data channel failed');sent.push(JSON.parse(value))}};channels.push(channel);return channel}
     addTransceiver(kind){const transceiver={kind,sender:{replaceCalls:[],async replaceTrack(track){this.replaceCalls.push(track);if(this.replaceHandler)return await this.replaceHandler(track);this.track=track}}};(this.transceivers??=[]).push(transceiver);return transceiver}
     async createOffer(){return {type:'offer',sdp:'test-sdp'}}
     async setLocalDescription(value){this.localDescription=value}
@@ -65,6 +65,7 @@ assert.equal(JSON.parse(connected.requests[0].options.body).separateControl,true
 assert.equal(JSON.parse(connected.requests[0].options.body).preferences.quality,'480');
 assert.equal(JSON.parse(connected.requests[0].options.body).preferences.fps,60);
 assert.equal(JSON.parse(connected.requests[0].options.body).preferences.fixedProfile,true);
+assert.equal(JSON.parse(connected.requests[0].options.body).preferences.display,'original','Every new page must explicitly prefer the physical computer desktop');
 assert.equal(connected.requests[0].options.credentials,'omit');
 const unavailable=await start(false);
 assert(unavailable.stages.includes('connection-error'));
@@ -173,7 +174,8 @@ for(const status of [503,200]){
   assert.equal(reports().length,1,'The prior valid measurement must ride the next ping');
   assert.deepEqual(reports()[0].receiverReport,{receivedFps:null,presentedFps:null,videoReceivedDelta:null,videoPresentedDelta:null,videoPresentationSource:null,videoPresentationAgeMs:null,viewerVisible:1,videoRequestedEnabled:1,videoPaused:null,audioRms:null,audioEnabled:0,audioContextState:null,audioOutputMode:0,audioElementMuted:1,fps:60,bufferMs:300,lossDelta:1,decodeMs:4,mbps:.05,inputAckMs:null,inputAckAgeMs:null,audioBufferMs:null,audioTotalSamplesDuration:null,audioTotalSamplesReceived:null,audioConcealedSamplesDelta:null,audioPlayoutSamplesDuration:null,audioTotalPlayoutDelay:null,audioTotalSamplesCount:null,audioPlayoutMs:null,audioBaseLatencyMs:null,audioOutputLatencyMs:null,videoDecodedDelta:60,videoKeyFramesDelta:null,videoPliDelta:null,videoNackDelta:null,videoFreezeDelta:null,videoDroppedDelta:null,playbackFramesDelta:null,playbackDroppedDelta:null});
   await viewer.intervals[0]();assert.equal(reports().length,1,'Receiver reports must be throttled rather than sent every second');
-  viewer.advanceTime(5000);await viewer.intervals[0]();assert.equal(reports().length,2);assert.equal(reports()[1].receiverReport.bufferMs,null,'Unsupported buffer statistics must be reported as unknown');
+  viewer.advanceTime(1999);await viewer.intervals[0]();assert.equal(reports().length,1,'Receiver reports must not exceed the two-second cadence');
+  viewer.advanceTime(1);await viewer.intervals[0]();assert.equal(reports().length,2,'A report must be sent at two seconds, before the five-second host freshness window');assert.equal(reports()[1].receiverReport.bufferMs,null,'Unsupported buffer statistics must be reported as unknown');
   const videoStream=nodes.screen.srcObject,audioStream=nodes.desktopAudio.srcObject;
   peer.connectionState='failed';peer.onconnectionstatechange();await viewer.fireTimer(1000);
   assert.equal(videoTrack.stopped,true);assert.equal(audioTrack.stopped,true);assert.equal(otherVideo.stopped,true);
@@ -326,7 +328,7 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(22);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=22/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(23);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=23/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }
 
 const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,clientY:100,button:0,preventDefault(){},...overrides});
@@ -604,10 +606,10 @@ console.log('Verified same-endpoint UDP-first browser candidates, IPv6/plain/TLS
 }
 
 {
- const pages=await start(true,scripts,async(path)=>path.endsWith('/version.json')?{ok:true,json:async()=>({build:22})}:{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})},undefined,19,undefined,false,undefined,'tycofficial.github.io');
+ const pages=await start(true,scripts,async(path)=>path.endsWith('/version.json')?{ok:true,json:async()=>({build:23})}:{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})},undefined,19,undefined,false,undefined,'tycofficial.github.io');
  assert(pages.requests.some(request=>request.path.endsWith('/version.json')));
  assert.equal(pages.navigations.length,1,'GitHub Pages must see its own build even when the signaling Site reports an older version');
- assert.match(pages.navigations[0],/_release=22/);
+ assert.match(pages.navigations[0],/_release=23/);
  console.log('Verified GitHub Pages release checking independent of the signaling Site version.');
 }
 
@@ -623,4 +625,64 @@ console.log('Verified same-endpoint UDP-first browser candidates, IPv6/plain/TLS
  video.onpointermove(hover());viewer.stepFrame();assert.equal(moves().length,blurred,'Blur releases remote pointer ownership');
  assert(!/#trackpad\s*\{[^}]*cursor\s*:\s*none/.test(html),'Trackpad must keep the physical mouse cursor visible');
  console.log('Verified passive page opening, visible local mouse, intentional pointer engagement and leave/blur release. No desktop input injected.');
+}
+
+{
+ const viewer=await start(true),control=viewer.channels.find(channel=>channel.label==='input'),state=viewer.channels.find(channel=>channel.label==='state');
+ assert.deepEqual(JSON.parse(JSON.stringify(state.options)),{ordered:false,maxRetransmits:0});
+ const states=()=>viewer.sent.filter(event=>event.type==='sessionState');
+ const acknowledge=event=>state.onmessage({data:JSON.stringify({type:'stateAck',stateType:event.state.type,revision:event.revision,appliedRevision:event.revision})});
+ state.onmessage({data:JSON.stringify({type:'pong',stateProtocol:1,time:0})});
+ for(const event of states())acknowledge(event);
+ control.bufferedAmount=100000;
+ viewer.nodes.quality.value='1080';viewer.nodes.quality.onchange();
+ const first=states().at(-1);assert.equal(first.state.quality,'1080');assert.equal(first.state.fps,60);assert.equal(first.state.fixedProfile,true);
+ await viewer.fireTimer(150);assert.equal(states().at(-1).revision,first.revision,'A lost state/ACK retries outside the blocked input stream');
+ viewer.nodes.quality.value='480';viewer.nodes.quality.onchange();const latest=states().at(-1);assert(latest.revision>first.revision);
+ acknowledge(first);await viewer.fireTimer(150);assert.equal(states().at(-1).revision,latest.revision,'A stale settings ACK cannot cancel the current selection');
+ acknowledge(latest);
+ const count=states().length;viewer.advanceTime(5000);assert.equal(states().length,count);
+ viewer.nodes.quality.value='1080';viewer.nodes.quality.onchange();await viewer.nodes.stop.onclick();
+ assert(![...viewer.timers.values()].some(timer=>timer.delay===150),'Disconnect cancels state retries');
+ const afterClose=states().length;state.onmessage({data:JSON.stringify({type:'pong',stateProtocol:1,time:0})});assert.equal(states().length,afterClose,'A stale channel cannot activate the next session');
+ console.log('Verified unordered acknowledged state bypasses input backlog, preserves 60 FPS, ignores stale ACKs, cancels retries and rejects stale-session callbacks. No input or network was used.');
+}
+
+{
+ assert.match(html,/<select id="displayMode"><option value="original" selected>/);
+ const displayPong=(channel,mode,height=1080)=>channel.onmessage({data:JSON.stringify({type:'pong',displayProtocol:1,time:0,source:{height,refresh:60},display:{mode,virtual:mode==='virtual',height}})});
+ const displayAck=(channel,event,stage='restarting',error)=>channel.onmessage({data:JSON.stringify({type:'displayAck',requestId:event.requestId,mode:event.mode,resolution:event.resolution,stage,error})});
+ const requests=viewer=>viewer.sent.filter(event=>event.type==='display');
+ {
+  const viewer=await start(true),input=viewer.channels.find(channel=>channel.label==='input'),state=viewer.channels.find(channel=>channel.label==='state');input.bufferedAmount=100000;
+  displayPong(state,'virtual');const first=requests(viewer).at(-1);assert.equal(first.mode,'original','A fresh viewer must correct a stale virtual capture preference');
+  assert.equal(viewer.nodes.displayMode.value,'original');assert.match(viewer.nodes.displayStatus.textContent,/当前画面：虚拟桌面.*正在请求/);
+  displayPong(state,'virtual');assert.equal(requests(viewer).length,1,'Routine old pongs must not start competing display changes');assert.equal(viewer.nodes.displayMode.value,'original','An old pong cannot overwrite the pending choice');
+  await viewer.fireTimer(250);assert.equal(requests(viewer).at(-1).requestId,first.requestId,'A lost request/ACK retries the same idempotency key');
+  displayAck(state,first);assert.match(viewer.nodes.displayStatus.textContent,/电脑已接受，正在确认新画面/);assert(!viewer.nodes.notice.textContent.includes('已切换'),'Writing the preference must not claim new frames have arrived');
+  displayPong(state,'original');assert.match(viewer.nodes.displayStatus.textContent,/正在确认新画面/,'Restart acceptance still requires confirmation from the next session');
+  await viewer.fireTimer(1500);assert.equal(viewer.peers.length,2);assert.equal(JSON.parse(viewer.requests.at(-1).options.body).preferences.display,'original');
+  const next=viewer.channels.filter(channel=>channel.label==='state').at(-1);displayPong(next,'original');assert.equal(viewer.nodes.displayStatus.textContent,'当前画面：原电脑桌面');assert.match(viewer.nodes.notice.textContent,/已切换至原电脑桌面/);
+  assert(![...viewer.timers.values()].some(timer=>timer.delay===45000),'Actual capture confirmation clears the total switch deadline');
+ }
+ {
+  const viewer=await start(true),state=viewer.channels.find(channel=>channel.label==='state');displayPong(state,'original');
+  viewer.nodes.displayMode.value='virtual4k';viewer.nodes.displayMode.onchange();const first=requests(viewer).at(-1);assert.equal(first.mode,'virtual');assert.equal(first.resolution,'2160');
+  displayPong(state,'original');assert.equal(viewer.nodes.displayMode.value,'virtual4k');displayAck(state,first);await viewer.fireTimer(1500);
+  assert.equal(JSON.parse(viewer.requests.at(-1).options.body).preferences.display,'virtual4k','An explicit virtual selection survives the required reconnect');
+  const next=viewer.channels.filter(channel=>channel.label==='state').at(-1);displayPong(next,'virtual',2160);assert.equal(viewer.nodes.displayStatus.textContent,'当前画面：虚拟桌面 · 4K');assert.equal(viewer.nodes.displayMode.value,'virtual4k');
+  viewer.nodes.originalDesktop.onclick();const latest=requests(viewer).at(-1);displayAck(state,first,'applied');assert.match(viewer.nodes.displayStatus.textContent,/正在请求切换至原电脑桌面/,'A stale peer ACK cannot finish the new display request');
+  displayAck(next,latest,'applied');displayPong(next,'original');assert.equal(viewer.nodes.displayStatus.textContent,'当前画面：原电脑桌面');
+ }
+ {
+  const viewer=await start(true),state=viewer.channels.find(channel=>channel.label==='state');displayPong(state,'original');viewer.nodes.displayMode.value='virtual';viewer.nodes.displayMode.onchange();
+  displayAck(state,requests(viewer).at(-1),'applied','Requested capture is unavailable');assert.match(viewer.nodes.displayStatus.textContent,/当前画面：原电脑桌面.*切屏失败/);assert(![...viewer.timers.values()].some(timer=>timer.delay===250));
+  displayPong(state,'original');assert.equal(requests(viewer).length,1,'A failed capture change must not loop automatically');
+  viewer.nodes.displayMode.value='virtual';viewer.nodes.displayMode.onchange();await viewer.fireTimer(45000);assert.match(viewer.nodes.displayStatus.textContent,/尚未得到实际画面确认/);displayPong(state,'original');assert.equal(requests(viewer).length,2,'A total timeout must stop automatic display retries');
+ }
+ {
+  const viewer=await start(true),input=viewer.channels.find(channel=>channel.label==='input');input.bufferedAmount=100000;viewer.nodes.originalDesktop.onclick();
+  assert.equal(requests(viewer).length,0);assert.match(viewer.nodes.notice.textContent,/请求未发出/,'A failed legacy send must not pretend the host is switching');
+ }
+ console.log('Verified original-desktop default, real capture status, loss-safe display requests, restart-vs-applied confirmation, manual virtual preference across reconnect, stale replies, explicit failures and bounded timeouts. No desktop input injected.');
 }
