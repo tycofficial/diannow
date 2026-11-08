@@ -44,6 +44,14 @@ def parsed(value, data):
     return RtpPacket.parse(data, value._RTCRtpSender__rtp_header_extensions_map)
 
 
+async def request(value, sequence):
+    await value._retransmit(sequence)
+    for _ in range(20):
+        if not value._video_retransmission['pendingRetransmits']:return
+        await asyncio.sleep(0)
+    raise AssertionError('Unblocked repair worker did not drain')
+
+
 async def main():
     clock = Clock()
     video, sent = sender()
@@ -52,13 +60,13 @@ async def main():
     for sequence in range(800):
         clock.now = sequence / 800
         write(video, sequence)
-    await video._retransmit(7)
+    await request(video, 7)
     recovered = parsed(video, sent[-1])
     assert recovered.sequence_number == 7 and recovered.ssrc == 321
     assert recovered.payload == bytes(1200) and recovered.extensions.mid == 'desktop-video'
     assert state['nackHits'] == state['retransmittedPackets'] == 1
     assert len(video._RTCRtpSender__rtp_history) == 800
-    await video._retransmit(1000)
+    await request(video, 1000)
     assert len(sent) == 1 and state['nackMisses'] == 1
     assert RTP_HISTORY_SIZE == 128, 'No global aiortc history limit may change'
 
@@ -66,15 +74,15 @@ async def main():
     duplicate_state = install_video_retransmission(coalesced, clock=clock)
     coalesced._RTCRtpSender__rtt = .6
     write(coalesced, 12)
-    await coalesced._retransmit(12)
+    await request(coalesced, 12)
     for _ in range(100):
-        await coalesced._retransmit(12)
+        await request(coalesced, 12)
     assert len(coalesced_bytes) == 1 and duplicate_state['nackSuppressed'] == 100
     clock.now += .59
-    await coalesced._retransmit(12)
+    await request(coalesced, 12)
     assert len(coalesced_bytes) == 1, 'Outstanding RTX must not repeat before its RTT'
     clock.now += .02
-    await coalesced._retransmit(12)
+    await request(coalesced, 12)
     assert len(coalesced_bytes) == 2, 'A genuinely lost RTX can be requested again after RTT'
     clock.now += 3.01
     history = coalesced._RTCRtpSender__rtp_history
@@ -88,7 +96,7 @@ async def main():
     assert len(bounded._RTCRtpSender__rtp_history) == 4
     assert limits['historyEvictions'] == 6
     clock.now += 3.01
-    await bounded._retransmit(9)
+    await request(bounded, 9)
     assert limits['nackMisses'] == 1 and limits['historyExpired'] == 4
     assert limits['historyPackets'] == limits['historyBytes'] == 0
 
@@ -106,8 +114,8 @@ async def main():
         write(wrapping, sequence, 17)
     wrapping._RTCRtpSender__rtx_payload_type = 103
     wrapping._RTCRtpSender__rtx_sequence_number = 65535
-    await wrapping._retransmit(65534)
-    await wrapping._retransmit(0)
+    await request(wrapping, 65534)
+    await request(wrapping, 0)
     first, second = [parsed(wrapping, raw) for raw in wrapped_bytes]
     assert first.payload_type == second.payload_type == 103
     assert first.ssrc == second.ssrc == wrapping._rtx_ssrc
@@ -153,7 +161,7 @@ async def main():
     assert stop_state['closed'] and stop_state['pendingRetransmits'] == 0
     assert stop_state['historyPackets'] == stop_state['historyBytes'] == 0
     write(stopping, 2)
-    await stopping._retransmit(2)
+    await request(stopping, 2)
     assert stop_state['historyPackets'] == stop_state['retransmittedPackets'] == 0
 
     entered.clear()
@@ -162,15 +170,16 @@ async def main():
     write(cancelled, 1)
     caller = asyncio.create_task(cancelled._retransmit(1))
     await asyncio.wait_for(entered.wait(), .5)
-    # The surrounding transport may mark the sender closed before cancelling
-    # its receive task. That genuine cancellation must not be swallowed.
-    cancelled_state['closed'] = True
-    caller.cancel()
-    result = await asyncio.gather(caller, return_exceptions=True)
-    assert caller.cancelled() and isinstance(result[0], asyncio.CancelledError)
-    assert cancelled_state['pendingRetransmits'] == 0
+    await asyncio.wait_for(caller,.02)
+    assert not caller.cancelled(), 'The RTCP caller must finish while a repair is blocked'
+    for sequence in range(2,1002):
+        write(cancelled,sequence)
+        await cancelled._retransmit(sequence)
+    assert cancelled_state['maximumPendingRetransmits']==256
+    assert cancelled_state['repairQueueDrops']==745
+    assert cancelled_state['pendingRetransmits']==256
     await cancelled.stop()
-    assert cancelled_state['historyPackets'] == cancelled_state['historyBytes'] == 0
+    assert cancelled_state['historyPackets'] == cancelled_state['historyBytes'] == cancelled_state['pendingRetransmits'] == 0
 
     # The other install order must compose too (pipeline wrapping this stop).
     outer_original = video.stop
@@ -191,14 +200,15 @@ async def main():
             pipeline = install_encoded_pipeline(combined)
             combined_state = install_video_retransmission(combined)
         write(combined, 7)
-        await combined._retransmit(7)
+        await request(combined, 7)
         await combined.stop()
         assert pipeline.closed and not pipeline.tasks
         assert combined_state['closed'] and combined_state['historyPackets'] == 0
     print(json.dumps({'olderThan128Recovered': True, 'countByteAgeBounds': True,
                       'sequenceAndRtxWrap': True, 'negotiatedExtensionsPreserved': True,
                       'audioUnchanged': True, 'stopComposesAndCancelsOwnedSends': True,
-                      'callerCancellationPreservedDuringClose': True,
+                      'rtcpProgressWhileRepairBlocked': True,
+                      'repairQueueBoundedAt256': True,
                       'duplicateNacksCoalescedUntilRtt': True,
                       'networkTraffic': False, 'desktopCaptured': False}))
 

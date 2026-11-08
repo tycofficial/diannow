@@ -27,6 +27,17 @@ async def main():
     try:await pacer.wait(1,0)
     except ValueError:pass
     else:raise AssertionError('Reject invalid rates')
+    # Original video and a repair packet enter before either timer wakes.
+    # Each must reserve its own slot; otherwise both get the same deadline.
+    clock=[0.0];waiters=[]
+    async def delayed(delay):
+        future=asyncio.get_running_loop().create_future();waiters.append((delay,future));await future
+    shared=PacketPacer(clock=lambda:clock[0],sleep=delayed)
+    await shared.wait(125,1_000_000)
+    first=asyncio.create_task(shared.wait(125,1_000_000));second=asyncio.create_task(shared.wait(125,1_000_000));await asyncio.sleep(0)
+    assert [round(delay,6) for delay,_ in waiters]==[.001,.002]
+    for _,future in waiters:future.set_result(None)
+    await asyncio.gather(first,second)
     print(json.dumps({'packets':128,'idealMs':round(expected*1000,1),'with2msTimerOvershootMs':round(elapsed*1000,1),'idleImmediatePackets':burst,'networkTraffic':False}))
 
 

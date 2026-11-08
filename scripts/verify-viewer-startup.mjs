@@ -8,7 +8,7 @@ assert.doesNotMatch(html,/<option value="1080" selected>/);
 const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match=>match[1]);
 assert.equal(scripts.length,2);
 async function flush(){for(let i=0;i<60;i++)await Promise.resolve()}
-async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12,sessionStorage,initialHidden=false,iceConfiguration){
+async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClass,serverBuild=12,sessionStorage,initialHidden=false,iceConfiguration,viewerHost='screen.example'){
   const navigations=[];const nodes={},stages=[],requests=[],peers=[],timers=new Map(),channels=[],sent=[],intervals=[],animationFrames=[],documentListeners={};let timerId=0,clockNow=Date.now();
   for(const [,id] of html.matchAll(/id="([^"]+)"/g)){
     let open=false;
@@ -37,7 +37,7 @@ async function start(rtcAvailable,sources=scripts,fetchResponse,AudioContextClas
   const navigator={audioSession:{type:'auto'}};
   const document={hidden:initialHidden,body:{classList:{toggle(){}}},getElementById:id=>nodes[id],querySelectorAll:()=>[],createElement:()=>({children:[],appendChild(child){this.children.push(child)},classList:{add(){},remove(){}}}),addEventListener(type,listener){(documentListeners[type]??=[]).push(listener)}};
   const context=vm.createContext({window,navigator,document,
-    location:{hostname:'screen.example',href:'https://screen.example/',replace(value){navigations.push(value)}},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(callback){animationFrames.push(callback)},performance:{now:()=>clockNow},
+    location:{hostname:viewerHost,href:'https://'+viewerHost+'/',replace(value){navigations.push(value)}},setTimeout:setTimer,clearTimeout:clearTimer,clearInterval(){},setInterval(callback){intervals.push(callback)},requestAnimationFrame(callback){animationFrames.push(callback)},performance:{now:()=>clockNow},
     Date:class extends Date{static now(){return clockNow}},URL,AbortController,MediaStream:class{tracks=[];addTrack(track){this.tracks.push(track)}getTracks(){return this.tracks}getAudioTracks(){return this.tracks.filter(track=>track.kind==='audio')}},RTCPeerConnection:rtcAvailable?Peer:undefined,
     XMLHttpRequest:class{open(){}setRequestHeader(){}send(value){stages.push(JSON.parse(value).stage)}},
     fetch:async(path,options)=>{if(path.endsWith('/api/version'))return {ok:true,json:async()=>({build:serverBuild})};if(path.endsWith('/api/ice'))return {ok:true,json:async()=>iceConfiguration||({iceServers:[{urls:'turn:relay.example:3478?transport=tcp',username:'test',credential:'test'}],relayAvailable:true})};requests.push({path,options});return fetchResponse?await fetchResponse(path,options):{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})}}});
@@ -326,7 +326,7 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(20);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=20/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(21);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=21/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }
 
 const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,clientY:100,button:0,preventDefault(){},...overrides});
@@ -556,7 +556,8 @@ console.log('Verified reliable per-session background video suspension, preserve
  assert.equal(JSON.stringify(config),before,'Normalization must not mutate the API response');
  viewer.peers[0].connectionState='failed';viewer.peers[0].onconnectionstatechange();await viewer.fireTimer(1000);
  const fallbacks=JSON.parse(JSON.stringify(viewer.peers[1].config.iceServers));assert.deepEqual(fallbacks[1].urls,['turn:[2001:db8::7]:3478?transport=tcp','turns:secure.example:5349?transport=tcp','turns:default-tls.example'],'Relay retry retains every configured TCP and TLS fallback');
- assert.equal(JSON.parse(viewer.requests.filter(request=>request.path==='/api/offer').at(-1).options.body).preferences.relayTransport,'tcp','Relay retry asks the desktop to change its own TURN client transport too');
+ const preferences=JSON.parse(viewer.requests.filter(request=>request.path==='/api/offer').at(-1).options.body).preferences;
+ assert.equal(preferences.viewerRelayTransport,'tcp');assert.equal(preferences.relayTransport,undefined,'A browser fallback must not force the independent desktop leg to TCP');
  assert(fallbacks.every(server=>server.urls.every(url=>!url.includes('transport=udp'))));
 }
 console.log('Verified same-endpoint UDP-first browser candidates, IPv6/plain/TLS URI safety, retained TCP/TLS fallbacks and unchanged API credentials. No media or network was used.');
@@ -600,4 +601,12 @@ console.log('Verified same-endpoint UDP-first browser candidates, IPv6/plain/TLS
  }
  console.log('Verified serialized microphone permission, disconnect/reconnect generation fencing, pending attachment cleanup, track revocation and replaceTrack failure. No microphone or network was opened.');
 }
+}
+
+{
+ const pages=await start(true,scripts,async(path)=>path.endsWith('/version.json')?{ok:true,json:async()=>({build:21})}:{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})},undefined,19,undefined,false,undefined,'tycofficial.github.io');
+ assert(pages.requests.some(request=>request.path.endsWith('/version.json')));
+ assert.equal(pages.navigations.length,1,'GitHub Pages must see its own build even when the signaling Site reports an older version');
+ assert.match(pages.navigations[0],/_release=21/);
+ console.log('Verified GitHub Pages release checking independent of the signaling Site version.');
 }

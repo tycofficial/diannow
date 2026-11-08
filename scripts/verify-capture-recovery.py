@@ -94,6 +94,30 @@ except RuntimeError:
 else:
     raise AssertionError('A permanently released proxy must not restart')
 
+# A failed output-copy allocation must retain the healthy producer. Memory
+# pressure can clear without allocating another set of GPU resources.
+pressure_camera = Camera()
+pressure = RecoveringCamera(lambda: pressure_camera, clock=clock)
+pressure.start(target_fps=60)
+def no_memory(**options):
+    raise MemoryError('simulated latest-frame copy allocation failure')
+pressure_camera.get_latest_frame = no_memory
+for _ in range(3):
+    try:
+        pressure.get_latest_frame()
+    except MemoryError:
+        pass
+    else:
+        raise AssertionError('Allocation failure must remain observable')
+    clock.now += .05
+assert pressure_camera.starts == 1 and pressure_camera.releases == 0
+assert pressure.diagnostics['memoryPressureRetries'] == 3
+assert pressure.diagnostics['generation'] == 1
+pressure_camera.get_latest_frame = lambda **options: pressure_camera.value
+assert pressure.get_latest_frame() is pressure_camera.value
+assert pressure.diagnostics['consecutiveFailures'] == 0
+pressure.release()
+
 # Failed creation is retried only after its bounded cooldown, not at the
 # shared reader's 50ms retry frequency.
 attempts = []

@@ -34,10 +34,11 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
         if len(data)>=2 and (data[1]&127) in state['videoPayloadTypes']:
             # RTCP NACK handling runs inside the DTLS receive loop. Waiting
             # there blocks incoming keyboard, pointer and SCTP ACK packets.
-            # Throttle only the primary video task; omit stale retransmits
-            # under congestion and let the next keyframe recover the decoder.
+            # Original video and the owned repair worker may wait. Unexpected
+            # callers (including a legacy RTCP handler) must remain nonblocking.
             primary=not state['videoSenders'] or any(asyncio.current_task() is getattr(sender,'_RTCRtpSender__rtp_task',None) for sender in state['videoSenders'])
-            if not primary and queue_size()>high_water:
+            repair=any(asyncio.current_task() is getattr(sender,'_video_retransmit_task',None) for sender in state['videoSenders'])
+            if not primary and not repair and queue_size()>high_water:
                 state['skippedStaleRetransmits']+=1;return
             while queue_size()>high_water:
                 if dtls.state in ['closed','failed'] or dtls.transport._connection._closed:raise ConnectionError('TURN transport closed')
@@ -45,7 +46,7 @@ def install_turn_flow_control(dtls,video_payload_types,high_water=8192,video_sen
                 if now-state['lastLog']>5:
                     state['lastLog']=now;print(json.dumps({'turnVideoBackpressure':True,'queuedBytes':queue_size(),'maxQueuedBytes':state['maxQueuedBytes']}),flush=True)
                 await asyncio.sleep(.005)
-            if primary and (state['configuredWriters'] or state['relayed']):
+            if (primary or repair) and (state['configuredWriters'] or state['relayed']):
                 # The relay's outgoing queue is beyond our local TCP socket.
                 # Respect receiver bandwidth feedback as well as local drain.
                 encoder=getattr(video_sender,'_RTCRtpSender__encoder',None) if video_sender else None

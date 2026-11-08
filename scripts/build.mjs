@@ -12,4 +12,7 @@ await writeFile('docs/index.html',page);
 await writeFile('docs/.nojekyll','');
 await writeFile('index.html',page);
 await writeFile('.nojekyll','');
+const version=JSON.stringify({build:Number(page.match(/const VIEWER_BUILD=(\d+)/)[1])})+'\n';
+await writeFile('docs/version.json',version);
+await writeFile('version.json',version);
 console.log('Built Worker ESM artifact.');

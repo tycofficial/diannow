@@ -12,6 +12,7 @@ from collections.abc import MutableMapping
 
 from aiortc.rtp import wrap_rtx
 from aiortc.utils import uint16_add
+from pylibsrtp import Error as SrtpError
 
 
 class VideoPacketHistory(MutableMapping):
@@ -140,16 +141,70 @@ def install_video_retransmission(sender, max_packets=4096, max_age=3.0,
              'historyByteLimit': max_bytes, 'historyPackets': 0, 'historyBytes': 0,
              'historyExpired': 0, 'historyEvictions': 0, 'historyOversizeDrops': 0,
              'nackHits': 0, 'nackMisses': 0, 'nackSuppressed': 0, 'retransmittedPackets': 0,
-             'pendingRetransmits': 0, 'closed': False}
+             'pendingRetransmits': 0, 'maximumPendingRetransmits': 0,
+             'repairQueueLimit': 256, 'repairQueueDrops': 0,
+             'repairExpired': 0, 'repairSendFailures': 0,
+             'rtxNegotiated': False, 'closed': False}
     history = VideoPacketHistory(state, max_packets, max_age, max_bytes, clock)
     previous = sender._RTCRtpSender__rtp_history
     for packet in previous.values():
         history[packet.sequence_number] = packet
     sender._RTCRtpSender__rtp_history = history
-    active_sends = set()
+    pending = OrderedDict()
+    active_sequence = None
+    worker = None
     original_stop = sender.stop
 
+    def update_pending():
+        state['pendingRetransmits'] = len(pending) + int(active_sequence is not None)
+        state['maximumPendingRetransmits'] = max(state['maximumPendingRetransmits'], state['pendingRetransmits'])
+
+    async def pump():
+        nonlocal active_sequence, worker
+        try:
+            while pending and not state['closed']:
+                sequence_number, enqueued = pending.popitem(last=False)
+                active_sequence = sequence_number
+                update_pending()
+                packet = history.get(sequence_number)
+                remaining = .5 - (clock() - enqueued)
+                if packet is None or remaining <= 0:
+                    state['repairExpired'] += 1
+                    continue
+                state['rtxNegotiated'] = sender._RTCRtpSender__rtx_payload_type is not None
+                if state['rtxNegotiated']:
+                    packet = wrap_rtx(packet,
+                                      payload_type=sender._RTCRtpSender__rtx_payload_type,
+                                      sequence_number=sender._RTCRtpSender__rtx_sequence_number,
+                                      ssrc=sender._rtx_ssrc)
+                    sender._RTCRtpSender__rtx_sequence_number = uint16_add(sender._RTCRtpSender__rtx_sequence_number, 1)
+                data = packet.serialize(sender._RTCRtpSender__rtp_header_extensions_map)
+                try:
+                    # Bound recovery delay on a congested TCP leg. Only this
+                    # worker waits, never the DTLS receive / RTCP handler.
+                    async with asyncio.timeout(remaining):
+                        await sender.transport._send_rtp(data)
+                    state['retransmittedPackets'] += 1
+                except TimeoutError:
+                    state['repairExpired'] += 1
+                except (ConnectionError, OSError, SrtpError):
+                    state['repairSendFailures'] += 1
+                    if sender.transport.state in ('closed', 'failed'):
+                        break
+                active_sequence = None
+                update_pending()
+                # Sending an entire NACK burst on UDP can otherwise complete
+                # synchronously and starve new video, audio and control.
+                await asyncio.sleep(0)
+        finally:
+            active_sequence = None
+            pending.clear()
+            update_pending()
+            worker = None
+            sender._video_retransmit_task = None
+
     async def retransmit(sequence_number):
+        nonlocal worker
         if state['closed']:
             return
         packet = history.get(sequence_number)
@@ -157,6 +212,9 @@ def install_video_retransmission(sender, max_packets=4096, max_age=3.0,
             state['nackMisses'] += 1
             return
         state['nackHits'] += 1
+        if sequence_number in pending or sequence_number == active_sequence:
+            state['nackSuppressed'] += 1
+            return
         # A receiver repeats outstanding gaps in later NACKs before the first
         # RTX can complete a round trip. Sending each duplicate immediately
         # multiplies traffic and can starve the original frames and ICE.
@@ -165,42 +223,33 @@ def install_video_retransmission(sender, max_packets=4096, max_age=3.0,
         if not history.allow_retransmit(sequence_number, cooldown):
             state['nackSuppressed'] += 1
             return
-        if sender._RTCRtpSender__rtx_payload_type is not None:
-            packet = wrap_rtx(packet,
-                              payload_type=sender._RTCRtpSender__rtx_payload_type,
-                              sequence_number=sender._RTCRtpSender__rtx_sequence_number,
-                              ssrc=sender._rtx_ssrc)
-            sender._RTCRtpSender__rtx_sequence_number = uint16_add(
-                sender._RTCRtpSender__rtx_sequence_number, 1)
-        log = getattr(sender, '_RTCRtpSender__log_debug', None)
-        if log is not None:
-            log('> %s', packet)
-        packet_bytes = packet.serialize(sender._RTCRtpSender__rtp_header_extensions_map)
-        task = asyncio.create_task(sender.transport._send_rtp(packet_bytes))
-        active_sends.add(task)
-        state['pendingRetransmits'] = len(active_sends)
-        try:
-            await task
-            state['retransmittedPackets'] += 1
-        except asyncio.CancelledError:
-            # stop() cancels our child send without cancelling its DTLS
-            # caller. A real cancellation of that caller must still escape,
-            # including when transport shutdown already marked us closed.
-            if not state['closed'] or asyncio.current_task().cancelling():
-                raise
-        finally:
-            active_sends.discard(task)
-            state['pendingRetransmits'] = len(active_sends)
+        if len(pending) + int(active_sequence is not None) >= state['repairQueueLimit']:
+            state['repairQueueDrops'] += 1
+            # A later request can try again; an unsent repair must not consume
+            # its RTT cooldown merely because the bounded queue was full.
+            history.last_retransmit.pop(sequence_number, None)
+            return
+        pending[sequence_number] = clock()
+        update_pending()
+        if worker is None:
+            worker = asyncio.create_task(pump())
+            sender._video_retransmit_task = worker
+            def observe(task):
+                if not task.cancelled():
+                    error = task.exception()
+                    if error is not None:state['repairSendFailures'] += 1
+            worker.add_done_callback(observe)
 
     async def stop(*args, **kwargs):
         state['closed'] = True
         history.close()
-        pending = list(active_sends)
-        for task in pending:
-            task.cancel()
+        pending.clear()
+        task = worker
+        if task is not None:task.cancel()
         try:
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            update_pending()
             return await original_stop(*args, **kwargs)
         finally:
             history.close()

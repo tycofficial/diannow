@@ -165,7 +165,7 @@ class TrackpadGestures {
   cancel(){if(this.dragging)this.emit({type:'button',button:0,down:false});this.dragging=false;this.pointers.clear();this.gesture=null}
 }
 
-const VIEWER_BUILD=19;
+const VIEWER_BUILD=20;
 const video=document.getElementById('screen'),desktopAudio=document.getElementById('desktopAudio'),statusEl=document.getElementById('status'),overlay=document.getElementById('overlay'),statsEl=document.getElementById('stats'),typing=document.getElementById('typing');
 let pc,control,motion,sessionId,connected=false,intentional=false,connecting=false,connectionGeneration=0,previousStats=null,lastFrame=0,pingRtt=0,sourceFps=0,held=new Set(),pointers=new Map(),mouseDown=false,lastY=0,composing=false,lastPoint={x:.5,y:.5},pendingMove=null,autoRetry,recoveryTimer,answerRecoveryTimer,lastPong=0,lastVideoRecovery=0;
 let padGestures,motionQueue;let touchGestures,pendingWheel=null,remoteStream,remoteAudioStream,microphoneSender,microphoneStream,microphoneReady=false,desktopAudioAvailable=false,inputId=0,moveSequence=0,noticeTimer;
@@ -363,7 +363,7 @@ async function connect(){
   await Promise.race([new Promise(resolve=>{if(active.iceGatheringState==='complete')resolve();else active.addEventListener('icegatheringstatechange',()=>{if(active.iceGatheringState==='complete')resolve()})}),new Promise(resolve=>setTimeout(resolve,8000))]);
   if(!current())return;
   const offer=active.localDescription;
-  const response=await api('/api/offer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({viewerId,viewerVersion:'11.08.'+VIEWER_BUILD,separateControl:true,sdp:offer.sdp,type:offer.type,preferences:{quality:qualitySelect.value==='auto'?'480':qualitySelect.value,fps:Number(fpsSelect.value),fixedProfile:qualitySelect.value!=='auto',videoEnabled:!document.hidden,relayTransport:relayNext&&relayAvailable?'tcp':undefined}})});
+  const response=await api('/api/offer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({viewerId,viewerVersion:'11.08.'+VIEWER_BUILD,separateControl:true,sdp:offer.sdp,type:offer.type,preferences:{quality:qualitySelect.value==='auto'?'480':qualitySelect.value,fps:Number(fpsSelect.value),fixedProfile:qualitySelect.value!=='auto',videoEnabled:!document.hidden,viewerRelayTransport:relayNext&&relayAvailable?'tcp':undefined}})});
   if(!current())return;
   if(!response.ok)throw new Error('建立连接失败：HTTP '+response.status);
   const result=await response.json();
@@ -522,7 +522,7 @@ window.visualViewport?.addEventListener('resize',fitViewport);window.addEventLis
 let updateRequested=false;
 async function checkForUpdate(){
  if(updateRequested||document.hidden||typing.value||oskHeld.size||touchGestures?.pointers.size||padGestures?.pointers.size)return;
- try{const reply=await api('/api/version',{cache:'no-store'});if(!reply.ok)return;const info=await reply.json();if(Number.isInteger(info.build)&&info.build>VIEWER_BUILD){const next=new URL(location.href);if(next.searchParams.get('_release')===String(info.build))return;next.searchParams.set('_release',String(info.build));updateRequested=true;release();location.replace(next.href)}}catch{}
+ try{const reply=location.hostname.endsWith('.github.io')?await fetch(new URL('version.json',location.href).href,{cache:'no-store'}):await api('/api/version',{cache:'no-store'});if(!reply.ok)return;const info=await reply.json();if(Number.isInteger(info.build)&&info.build>VIEWER_BUILD){const next=new URL(location.href);if(next.searchParams.get('_release')===String(info.build))return;next.searchParams.set('_release',String(info.build));updateRequested=true;release();location.replace(next.href)}}catch{}
 }
 window.desktopBoot.stage('ready');checkForUpdate();connect();setInterval(checkForUpdate,60000);
 window.addEventListener('pagehide',()=>{intentional=true;connectionGeneration++;clearTimeout(autoRetry);clearTimeout(recoveryTimer);release();writeInput(control,{type:'disconnect'})});

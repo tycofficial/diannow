@@ -16,11 +16,13 @@ class PacketPacer:
         if bits_per_second<=0:raise ValueError('A positive packet rate is required')
         now=self.clock()
         deadline=now if self.next_at is None else max(self.next_at,now-self.burst_seconds)
-        if deadline>now:await self.sleep(deadline-now)
         # A late wake may spend up to four milliseconds of accumulated credit.
         # Starting a new interval at every actual wake would compound Windows
         # timer overshoot on every RTP packet and throttle even an idle link.
-        self.next_at=max(deadline,self.clock()-self.burst_seconds)+8*byte_count/bits_per_second
+        # Reserve before suspension, so the original sender and repair worker
+        # cannot wake on the same slot or overwrite each other's deadlines.
+        self.next_at=deadline+8*byte_count/bits_per_second
+        if deadline>now:await self.sleep(deadline-now)
 
 
 def install_cooperative_rtp_send(transport,packet_limit=16,burst_seconds=.002,*,clock=None,yield_now=None):

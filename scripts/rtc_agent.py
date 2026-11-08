@@ -24,6 +24,7 @@ from ice_consent import install_consent_window
 from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
 from turn_route import select_udp_turn_route
+from turn_fast_path import install_turn_fast_path
 from capture_recovery import RecoveringCamera
 from control_transport import isolate_control
 from encoded_pipeline import install_encoded_pipeline
@@ -53,6 +54,20 @@ def desktop_ice_servers(config,turn_transport=None):
         if turn_transport=='tcp':supported=[value for value in supported if value.startswith(('stun:','turns:')) or 'transport=tcp' in value]
         if supported:servers.append(RTCIceServer(urls=supported,username=server.get('username'),credential=server.get('credential')))
     return servers
+
+def session_ice_servers(owner, preferences):
+    # TURN's client transports are independent on the two legs. A phone
+    # needing TCP must not force a working desktop UDP leg onto a slow TCP
+    # path. The explicit desktop override exists only for route diagnostics.
+    servers=getattr(owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])
+    if preferences.get('desktopRelayTransport')=='tcp':
+        return desktop_ice_servers(getattr(owner,'ice_config',{}),turn_transport='tcp') or servers
+    return servers
+
+def video_codec_preferences():
+    # RTX is a separate capability. Filtering it out disables the browser's
+    # negotiated repair stream even when H264 itself is fully supported.
+    return [codec for codec in RTCRtpSender.getCapabilities('video').codecs if codec.mimeType.lower() in ('video/h264','video/rtx')]
 
 class WindowsTimerResolution:
     def __init__(self,milliseconds=1,winmm=None):self.milliseconds=milliseconds;self.winmm=winmm;self.active=False
@@ -409,6 +424,29 @@ class DesktopSession:
         while len(self.fps_samples)>1 and self.fps_samples[0][0]<now-5:self.fps_samples.popleft()
         started,count=self.fps_samples[0];elapsed=now-started
         return round((track.sent-count)/elapsed,1) if elapsed>0 else 0
+    def pong(self,event):
+        # Heartbeats share the reliable input stream. Keep routine replies in
+        # one SCTP fragment; several KiB of unused diagnostics force every
+        # later acknowledgement to wait for a lost status fragment.
+        track=self.track
+        value={'type':'pong','time':event.get('time'),'sent':track.sent,
+               'fps':self.recent_fps(track),'videoEnabled':self.video_enabled,
+               'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible',
+               'cursor':self.input.cursor(),'display':{'virtual':bool(self.owner.display.get('virtual'))},
+               'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},
+               'stream':{'width':track.width,'height':track.height,'fps':track.fps},
+               'audio':self.audio_track is not None,
+               'audioError':self.audio_error or getattr(self.audio_track,'error',None),
+               'microphoneError':getattr(self.mic_sink,'error',None),
+               'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),
+               'audioRouteError':self.owner.audio_router.error,
+               'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],
+               'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}
+        if event.get('diagnostics') is True:
+            value.update(videoDiagnostics=self.video_diagnostics(),display=self.owner.display,displays=displays(),
+                         audioCaptureRecoveries=getattr(self.audio_track,'recoveries',0),
+                         microphoneRecoveries=getattr(self.mic_sink,'recoveries',0))
+        return json.dumps({key:item for key,item in value.items() if item is not None},separators=(',',':'))
     def report_receiver(self,event,now=None):
         now=time.monotonic() if now is None else now
         report=event.get('receiverReport')
@@ -436,6 +474,7 @@ class DesktopSession:
             result['turnClientTransport']=getattr(connection,'turn_transport',None)
             result['candidatePairs']=[{'local':pair.local_candidate.type,'remote':pair.remote_candidate.type} for pair in getattr(connection,'_nominated',{}).values()]
             result['turnTcpRoutes']=sorted({route for pair in getattr(connection,'_nominated',{}).values() if (route:=getattr(pair.protocol.transport,'_desktop_turn_route',None))})
+            result['turnFastPath']=[dict(state) for pair in getattr(connection,'_nominated',{}).values() if (state:=getattr(pair.protocol.transport,'_desktop_turn_fast_path',None)) is not None]
         if encoder is not None:result.update(targetBitrate=getattr(encoder,'target_bitrate',None),fixedProfile=getattr(encoder,'fixed_profile',False),codecGenerations=getattr(encoder,'codec_generations',0))
         pipeline=getattr(sender,'_encoded_pipeline',None)
         if pipeline is not None:result['pipeline']=dict(pipeline.stats)
@@ -491,9 +530,8 @@ class DesktopSession:
         self.video_enabled=preferences.get('videoEnabled') is not False
         fps=max(15,min(120,self.refresh,int(preferences.get('fps',60))))
         width,height=stream_dimensions(self.source_width,self.source_height,preferences.get('quality','480'))
-        if not self.camera.is_capturing:self.camera.start(target_fps=min(120,self.refresh),video_mode=True)
-        servers=getattr(self.owner,'ice_servers',[RTCIceServer(urls='stun:stun.cloudflare.com:3478')])
-        if preferences.get('relayTransport')=='tcp':servers=desktop_ice_servers(getattr(self.owner,'ice_config',{}),turn_transport='tcp') or servers
+        self.owner.ensure_capture_rate(fps)
+        servers=session_ice_servers(self.owner,preferences)
         self.pc=pc=RTCPeerConnection(RTCConfiguration(iceServers=servers))
         self.track=track=DesktopTrack(self.camera,width,height,fps,self.session_id,frame_source=self.owner.frame_source,fixed_profile=preferences.get('fixedProfile') is True)
         track.set_streaming(False)
@@ -526,7 +564,7 @@ class DesktopSession:
         def on_remote_track(remote_track):
             if remote_track.kind=='audio' and self.mic_sink:self.mic_task=asyncio.create_task(self.mic_sink.consume(remote_track))
         for transceiver in pc.getTransceivers():
-            if transceiver.kind=='video':transceiver.setCodecPreferences([codec for codec in RTCRtpSender.getCapabilities('video').codecs if codec.mimeType.lower()=='video/h264'])
+            if transceiver.kind=='video':transceiver.setCodecPreferences(video_codec_preferences())
         @pc.on('datachannel')
         def on_channel(channel):
             loop=asyncio.get_running_loop()
@@ -541,12 +579,13 @@ class DesktopSession:
                     self.last_activity=time.monotonic()
                     if event.get('type')=='ping':
                         self.report_receiver(event)
-                        channel.send(json.dumps({'type':'pong','time':event.get('time'),'sent':track.sent,'fps':self.recent_fps(track),'videoEnabled':self.video_enabled,'videoDiagnostics':self.video_diagnostics(),'inputError':self.input.error,'touchInputMode':'native' if self.input.native_touch else 'compatible','cursor':self.input.cursor(),'display':self.owner.display,'displays':displays(),'source':{'width':self.source_width,'height':self.source_height,'refresh':self.refresh},'stream':{'width':track.width,'height':track.height,'fps':track.fps},'audio':self.audio_track is not None,'audioError':self.audio_error or getattr(self.audio_track,'error',None),'audioCaptureRecoveries':getattr(self.audio_track,'recoveries',0),'microphoneError':getattr(self.mic_sink,'error',None),'microphoneRecoveries':getattr(self.mic_sink,'recoveries',0),'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),'audioRouteError':self.owner.audio_router.error,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}))
+                        channel.send(self.pong(event))
                     elif event.get('type')=='videoState':
                         if isinstance(event.get('enabled'),bool):self.set_video_enabled(event['enabled'])
                     elif event.get('type')=='settings':
                         track.width,track.height=stream_dimensions(self.source_width,self.source_height,event.get('quality','480'))
                         track.fps=max(15,min(120,self.refresh,int(event.get('fps',60))));track.fixed_profile=event.get('fixedProfile',track.fixed_profile) is True;track.delivery=DeliveryPolicy(track.fps,fixed=track.fixed_profile)
+                        self.owner.ensure_capture_rate(track.fps)
                     elif event.get('type')=='display' and event.get('mode') in ['original','virtual']:
                         if event['mode']=='virtual' and not any(d['virtual'] and d['attached'] for d in displays()):raise RuntimeError('Virtual display not ready')
                         async def change_display():
@@ -613,6 +652,7 @@ class DesktopSession:
         answer=independent_media_description(await pc.createAnswer(),cnames)
         if self.separate_control:answer,_=isolate_control(answer)
         await pc.setLocalDescription(answer)
+        install_turn_fast_path(pc)
         print(json.dumps({'sessionId':self.session_id,'separateControlTransport':bool(pc.sctp and pc.sctp.transport is not self.video_sender.transport)}),flush=True)
         if getattr(self,'audio_sender',None):self.audio_sender._enabled=False
         self.consent_state=install_consent_window(pc)
@@ -667,6 +707,18 @@ class DesktopAgent:
         print(json.dumps({'hardwareBgra':self.frame_source.hardware}),flush=True)
         self.media_devices=MediaDevices()
         self.audio_router=AudioRouter()
+        self.capture_rate=0
+    def ensure_capture_rate(self, requested):
+        # A 120Hz virtual monitor does not require 120 full CPU readbacks for
+        # a 60fps stream. Keep one shared producer at the highest requested
+        # viewer rate. Never lower it during an active session or restart it
+        # because of network feedback; a new session after idle starts fresh.
+        rate=min(120,self.refresh,max([int(requested),*(getattr(session.track,'fps',0) for session in self.sessions if not session.closed and session.track is not None)]))
+        if self.camera.is_capturing and rate<=getattr(self,'capture_rate',0):return
+        self.camera.start(target_fps=rate,video_mode=True)
+        self.capture_rate=rate
+        self.frame_source.refresh=rate
+        print(json.dumps({'captureTargetFps':rate,'displayRefresh':self.refresh}),flush=True)
     def update_input_state(self):
         if any(session.pc and session.pc.connectionState=='connected' for session in self.sessions):self.input.enabled=True
         else:self.input.disable()

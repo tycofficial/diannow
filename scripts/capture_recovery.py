@@ -28,7 +28,8 @@ class RecoveringCamera:
         self._unconfirmed_recovery = False
         self._options = {}
         self._stats = {'generation': 0, 'recoveries': 0, 'failures': 0,
-                       'consecutiveFailures': 0, 'lastError': None}
+                       'consecutiveFailures': 0, 'memoryPressureRetries': 0,
+                       'lastError': None}
 
     @property
     def is_capturing(self):
@@ -121,6 +122,11 @@ class RecoveringCamera:
         with self._lock:
             if self._released:
                 raise RuntimeError('Desktop capture has been released')
+            if options != self._options and self._camera is not None and self._camera.is_capturing and not self._invalid and not self._disposed(self._camera):
+                # A deliberate higher viewer frame rate needs a new producer
+                # timer, but can reuse healthy DXGI resources and identity.
+                self._camera.stop()
+                self._running_expected = False
             self._options = dict(options)
             self._requested = True
             self._ensure_started()
@@ -146,7 +152,21 @@ class RecoveringCamera:
             except Exception as error:
                 with self._lock:
                     if camera is self._camera and self._requested:
-                        self._failed(error)
+                        if isinstance(error, MemoryError) and camera.is_capturing and not self._disposed(camera):
+                            # DXcam copies the latest ring-buffer image for
+                            # this reader. A failed allocation does not mean
+                            # the healthy DXGI producer must be destroyed.
+                            # Recreating its GPU resources under commit
+                            # pressure needs still more memory and can turn
+                            # one failed copy into a prolonged black screen.
+                            self._stats['failures'] += 1
+                            self._stats['consecutiveFailures'] += 1
+                            self._stats['memoryPressureRetries'] += 1
+                            self._stats['lastError'] = 'MemoryError'
+                            if self._log and self._stats['consecutiveFailures'] == 1:
+                                self._log({'captureMemoryPressure': True})
+                        else:
+                            self._failed(error)
                     else:
                         return None
                 raise
