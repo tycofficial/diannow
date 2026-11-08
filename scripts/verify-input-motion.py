@@ -26,11 +26,15 @@ assert len(touches)==5 and not remote.touch_owner
 
 # A reliable button boundary must fence older motion on the unreliable channel.
 captured.clear()
+remote.apply({'type':'button','button':0,'down':True,'_owner':'phone'})
 remote.apply({'type':'move','x':.2,'y':.3,'seq':1,'_owner':'phone'})
 remote.apply({'type':'button','button':0,'down':False,'x':.8,'y':.6,'seq':3,'_owner':'phone'})
 before=len(captured)
 remote.apply({'type':'move','x':.4,'y':.4,'seq':2,'_owner':'phone'})
 assert len(captured)==before,'Late pre-release movement must not reposition the pointer'
+remote.apply({'type':'button','button':2,'down':True,'_owner':'ipad'})
+remote.apply({'type':'button','button':2,'down':False,'_owner':'ipad'})
+before=len(captured)
 remote.apply({'type':'move','x':.1,'y':.1,'seq':1,'_owner':'ipad'})
 assert len(captured)==before+1,'A second viewer has an independent sequence counter'
 assert 'legacy' not in remote.owners,'Button coordinates must retain their owning viewer'
@@ -38,6 +42,10 @@ assert 'legacy' not in remote.owners,'Button coordinates must retain their ownin
 # Fast motion can overtake a reliable DOWN; the click still belongs at DOWN's
 # original coordinate, not wherever the overtaking packet moved the cursor.
 captured.clear()
+# Establish deliberate control before testing overtaken motion. Activation
+# is per viewer, so a new owner's passive hover is intentionally ignored.
+remote.apply({'type':'button','button':2,'down':True,'_owner':'reordered'})
+remote.apply({'type':'button','button':2,'down':False,'_owner':'reordered'})
 remote.apply({'type':'move','x':.8,'y':.8,'seq':2,'_owner':'reordered'})
 remote.apply({'type':'button','button':0,'down':True,'x':.1,'y':.2,'seq':1,'_owner':'reordered'})
 assert captured[-2].mi.dwFlags==0x8001 and captured[-2].mi.dx==round(.1*65535) and captured[-2].mi.dy==round(.2*65535)

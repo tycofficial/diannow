@@ -6,9 +6,8 @@ def record(inputs):captured.extend(inputs);batches.append((time.perf_counter(),l
 module.emit=record
 remote=module.RemoteInput()
 remote.enabled=True
-remote.apply({'type':'move','x':1,'y':0})
-assert captured[-1].mi.dx==65535 and captured[-1].mi.dy==0
-remote.apply({'type':'button','button':0,'down':True})
+remote.apply({'type':'button','button':0,'down':True,'x':1,'y':0})
+assert captured[-2].mi.dx==65535 and captured[-2].mi.dy==0
 assert remote.buttons=={0}
 remote.disable()
 assert remote.buttons==set() and not remote.enabled

@@ -20,6 +20,7 @@ from audio_routing import AudioRouter
 from display_target import capture_target,displays,set_preference,activate_virtual,STATE as DISPLAY_STATE
 from low_latency_rtp import configure_video_playout_delay
 from rtp_scheduling import install_cooperative_rtp_send
+from rtp_send_time import install_rtp_send_time
 from ice_consent import install_consent_window
 from turn_flow_control import install_turn_flow_control
 from turn_proxy import install_turn_proxy
@@ -482,6 +483,8 @@ class DesktopSession:
         if worker is not None:result['encoderWorker']=dict(worker.stats)
         history=getattr(sender,'_video_retransmission',None)
         if history is not None:result['retransmission']=dict(history)
+        send_time=getattr(sender,'_desktop_rtp_send_time',None)
+        if send_time is not None:result['sendTime']=dict(send_time.state)
         flow=getattr(self,'turn_flow',None)
         if flow is not None:result['pacing']={key:flow.get(key) for key in ('pacingBitsPerSecond','waits','maxQueuedBytes','skippedStaleRetransmits')}
         rtt=getattr(sender,'_RTCRtpSender__rtt',None)
@@ -644,6 +647,7 @@ class DesktopSession:
         self.watchdog=asyncio.create_task(expire_idle())
         remote_description,self.separate_control=isolate_control(RTCSessionDescription(sdp=offer['sdp'],type=offer['type']),bool(offer.get('separateControl')))
         await pc.setRemoteDescription(remote_description)
+        install_rtp_send_time(self.video_sender)
         for transceiver in pc.getTransceivers():install_cooperative_rtp_send(transceiver.sender.transport)
         for transceiver in pc.getTransceivers():
             if transceiver.kind=='video':self.turn_flow=install_turn_flow_control(transceiver.sender.transport,[codec.payloadType for codec in transceiver._codecs],video_sender=transceiver.sender)

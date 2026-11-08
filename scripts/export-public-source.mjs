@@ -4,6 +4,7 @@ import {readFile,readdir} from 'node:fs/promises';
 // stay outside this allowlist; .env.example contains placeholders only.
 const runtimePaths=['index.html','.nojekyll','README.md','THIRD_PARTY.md','requirements.txt','package.json','.gitignore','.env.example','.openai/hosting.json','worker/index.js','web/viewer.html','web/gestures.mjs','docs/index.html','docs/.nojekyll','scripts/build.mjs','scripts/validate-artifact.mjs','scripts/export-public-source.mjs','scripts/rtc_agent.py','scripts/remote_input.py','scripts/desktop_audio.py','scripts/audio_routing.py','scripts/touch_injection.py','scripts/display_target.py','scripts/install-signed-drivers.ps1','scripts/configure-desktop-network.ps1','scripts/low_latency_rtp.py','scripts/rtp_scheduling.py','scripts/ice_consent.py','scripts/turn_flow_control.py','scripts/turn_proxy.py'];
 runtimePaths.push('scripts/control_transport.py');
+runtimePaths.push('scripts/rtp_send_time.py');
 runtimePaths.push('version.json','docs/version.json');
 runtimePaths.push('scripts/bitrate_stability.py');
 runtimePaths.push('scripts/stream_profile.py');

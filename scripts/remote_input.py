@@ -152,6 +152,7 @@ class RemoteInput:
                 if not any(button in value['buttons'] for value in self.owners.values()):emit([mouse({0:4,1:64,2:16}[button])]);self.buttons.discard(button)
             if not forget:
                 state['keys'].clear();state['buttons'].clear();state['touchGesture']=None
+                state['pointerArmed']=False
                 self.owners[owner]=state
     def disable(self):
         with self.state_lock:
@@ -247,7 +248,20 @@ class RemoteInput:
     def _apply(self,event):
         kind=event.get('type')
         owner=event.get('_owner','legacy')
-        state=self.owners.setdefault(owner,{'keys':set(),'buttons':set()})
+        state=self.owners.setdefault(owner,{'keys':set(),'buttons':set(),'pointerArmed':False})
+        if kind=='button':
+            button=int(event.get('button',0))
+            if button not in [0,1,2]:return
+            if event.get('down'):
+                # Opening a viewer must not let passive hover relocate the
+                # physical cursor, especially onto a virtual monitor. A real
+                # gesture activates pointer control for this viewer only.
+                # Arm before applying its embedded final position/snapshot.
+                state['pointerArmed']=True
+            elif button not in state['buttons']:
+                # An unowned UP must neither move the pointer nor release a
+                # button currently held by somebody at the physical computer.
+                return
         snapshot=event.get('relativeSnapshot')
         if kind=='button' and isinstance(snapshot,dict):self._apply({'type':'relative','_owner':owner,'totalX':snapshot.get('totalX',0),'totalY':snapshot.get('totalY',0),'seq':snapshot.get('seq',0)})
         if kind=='touch':
@@ -260,6 +274,7 @@ class RemoteInput:
                 state['touchSeq']=sequence
                 if phase in ['up','cancel']:state['touchGesture']=None
             if event.get('phase')=='down':
+                state['pointerArmed']=True
                 if self.touch_owner and self.touch_owner!=owner:self._release_touch()
                 self.touch_owner=owner
             if self.touch_owner==owner:
@@ -280,6 +295,8 @@ class RemoteInput:
                 previous_total=state.get('relativeTotals',(0,0));dx=total_x-previous_total[0];dy=total_y-previous_total[1]
                 state['relativeTotals']=(total_x,total_y);state['relativeSeq']=sequence
             else:dx=float(event.get('dx',0));dy=float(event.get('dy',0))
+            if not all(-1e9<value<1e9 for value in [dx,dy]):return
+            if dx or dy:state['pointerArmed']=True
             previous=state.get('fraction',(0,0));x=max(-2000,min(2000,dx))+previous[0];y=max(-2000,min(2000,dy))+previous[1]
             dx=round(x);dy=round(y);state['fraction']=(x-dx,y-dy)
             if dx or dy:
@@ -297,6 +314,7 @@ class RemoteInput:
                 state['keys'].discard(vk)
                 if not any(vk in value['keys'] for value in self.owners.values()):emit([key(vk,True)]);self.pressed.discard(vk)
         elif kind=='move':
+            if not state.get('pointerArmed',False):return
             sequence=int(event.get('seq',0))
             if sequence and sequence<=state.get('moveSeq',0):return
             if sequence:state['moveSeq']=sequence
@@ -322,11 +340,13 @@ class RemoteInput:
                 state['buttons'].discard(button)
                 if not any(button in value['buttons'] for value in self.owners.values()):emit([mouse({0:4,1:64,2:16}[button])]);self.buttons.discard(button)
         elif kind=='wheel':
+            value=max(-1200,min(1200,int(event.get('delta',0))))
+            if not value:return
+            state['pointerArmed']=True
             if 'x' in event and 'y' in event:
                 self.apply({'type':'move','x':event['x'],'y':event['y'],'_owner':owner})
                 point=POINT();user32.GetCursorPos(ctypes.byref(point));target=user32.WindowFromPoint(point)
                 if target:user32.SetForegroundWindow(user32.GetAncestor(target,2) or target)
-            value=max(-1200,min(1200,int(event.get('delta',0))))
             emit([mouse(0x0800,value)])
         elif kind=='text':
             text=str(event.get('text',''))[:4096]

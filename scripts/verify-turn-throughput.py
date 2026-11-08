@@ -4,7 +4,7 @@ No desktop/audio data, no new service, and no credential/address output.
 Both clients use this machine's monotonic clock. Delay includes the complete
 client -> relay -> client path; this is not a phone measurement.
 """
-import argparse, asyncio, ctypes, json, math, statistics, struct, time
+import argparse, asyncio, ctypes, json, math, statistics, struct, time, socket
 import aiohttp
 from aioice.turn import create_turn_endpoint
 from turn_route import _configured_udp_endpoints
@@ -53,6 +53,12 @@ async def main(args):
             a,ra=await asyncio.wait_for(endpoint_factory(Receiver,**options),8)
             stage='second-allocation'
             b,rb=await asyncio.wait_for(endpoint_factory(Receiver,**options),8)
+            receive_buffers=[]
+            if args.transport=='udp':
+                for allocation in (a,b):
+                    stream=allocation._TurnTransport__inner_protocol.transport.get_extra_info('socket')
+                    if args.receive_buffer:stream.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,args.receive_buffer)
+                    receive_buffers.append(stream.getsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF))
             stage='channel-bind'
             aa=a.get_extra_info('sockname');ba=b.get_extra_info('sockname')
             await asyncio.wait_for(asyncio.gather(a._TurnTransport__inner_protocol.send_data(b'init',ba),b._TurnTransport__inner_protocol.send_data(b'init',aa)),8)
@@ -73,14 +79,15 @@ async def main(args):
                 gaps=[1000*(ordered[i][0]-ordered[i-1][0]) for i in range(1,len(ordered))]
                 received=len(samples)
                 p95=latencies[min(len(latencies)-1,math.ceil(.95*len(latencies))-1)] if latencies else None
-                print(json.dumps({'endpoint':index,'transport':args.transport,'proxy':args.proxy_tcp,'targetMbps':mbps,'packetBytes':args.packet_size,'seconds':round(duration,2),'sentPackets':sent,'receivedPackets':received,'notReceivedWithinDrainPercent':round(100*(sent-received)/max(1,sent),3),'sentMbps':round(sent*args.packet_size*8/duration/1e6,3),'receivedMbps':round(received*args.packet_size*8/duration/1e6,3),'medianPathDelayMs':round(statistics.median(latencies),2) if latencies else None,'p95PathDelayMs':round(p95,2) if p95 else None,'maxReceiveGapMs':round(max(gaps),2) if gaps else None,'socketErrors':ra.errors+rb.errors,'syntheticOnly':True}),flush=True)
+                print(json.dumps({'endpoint':index,'transport':args.transport,'proxy':args.proxy_tcp,'targetMbps':mbps,'packetBytes':args.packet_size,'udpReceiveBufferBytes':receive_buffers,'seconds':round(duration,2),'sentPackets':sent,'receivedPackets':received,'notReceivedWithinDrainPercent':round(100*(sent-received)/max(1,sent),3),'sentMbps':round(sent*args.packet_size*8/duration/1e6,3),'receivedMbps':round(received*args.packet_size*8/duration/1e6,3),'medianPathDelayMs':round(statistics.median(latencies),2) if latencies else None,'p95PathDelayMs':round(p95,2) if p95 else None,'maxReceiveGapMs':round(max(gaps),2) if gaps else None,'socketErrors':ra.errors+rb.errors,'syntheticOnly':True}),flush=True)
         except Exception as error:
             print(json.dumps({'endpoint':index,'transport':args.transport,'proxy':args.proxy_tcp,'stage':stage,'error':type(error).__name__,'syntheticOnly':True}),flush=True)
         finally:await asyncio.gather(close_transport(a),close_transport(b))
 
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--endpoint',type=int);parser.add_argument('--transport',choices=['udp','tcp'],default='udp');parser.add_argument('--seconds',type=int,default=10);parser.add_argument('--rates',default='1.5,8');parser.add_argument('--packet-size',type=int,default=1200);parser.add_argument('--proxy-tcp',action='store_true');args=parser.parse_args();args.rates=[float(x) for x in args.rates.split(',')]
+    parser=argparse.ArgumentParser();parser.add_argument('--endpoint',type=int);parser.add_argument('--transport',choices=['udp','tcp'],default='udp');parser.add_argument('--seconds',type=int,default=10);parser.add_argument('--rates',default='1.5,8');parser.add_argument('--packet-size',type=int,default=1200);parser.add_argument('--proxy-tcp',action='store_true');parser.add_argument('--receive-buffer',type=int,default=0);args=parser.parse_args();args.rates=[float(x) for x in args.rates.split(',')]
+    if args.receive_buffer not in (0,262144,1048576):parser.error('Use receive buffer 0, 262144 or 1048576')
     if args.proxy_tcp and args.transport!='tcp':parser.error('--proxy-tcp requires --transport tcp')
     if not 3<=args.seconds<=30 or not 200<=args.packet_size<=1400 or len(args.rates)>4 or any(not 0<r<=12 for r in args.rates):parser.error('Use bounded rates/durations/packet sizes')
     ctypes.windll.winmm.timeBeginPeriod(1)
