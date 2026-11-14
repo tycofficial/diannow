@@ -1,0 +1,35 @@
+// Real Chromium File.slice -> production JS -> real SCTP -> production Python -> D: disk.
+import {spawn} from 'node:child_process';
+import {mkdir,mkdtemp,open,readFile,rm,stat} from 'node:fs/promises';
+import {createReadStream} from 'node:fs';
+import {createHash} from 'node:crypto';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+const size=Number(process.argv.find(x=>x.startsWith('--bytes='))?.split('=')[1]||8388611);
+assert(Number.isSafeInteger(size)&&size>=0&&size<=3*1024**3);
+const base='D:/DIANNOW/FileTransferTests';await mkdir(base,{recursive:true});const root=await mkdtemp(base+'/browser-');
+const python=process.env.DIANNOW_TEST_PYTHON||path.resolve('.venv/Scripts/python.exe');
+const browserPath=process.env.DIANNOW_TEST_BROWSER||'C:/Program Files/Google/Chrome/Application/chrome.exe';
+let fixture,browser,socket,session,port,sequence=0;const pending=new Map();
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function call(method,params={},target=session){return new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{pending.delete(id);reject(new Error('CDP timeout '+method))},20000);pending.set(id,{resolve:v=>{clearTimeout(timer);resolve(v)},reject:e=>{clearTimeout(timer);reject(e)}});socket.send(JSON.stringify({id,method,params,...(target?{sessionId:target}:{})}))})}
+async function evaluate(expression){const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw new Error(r.exceptionDetails.text);return r.result.value}
+async function digest(file){const hash=createHash('sha256');for await(const chunk of createReadStream(file))hash.update(chunk);return hash.digest('hex')}
+try{
+ const source=path.join(root,'no_extension');const file=await open(source,'wx');const block=Buffer.alloc(1024*1024);for(let i=0;i<block.length;i++)block[i]=i%251;const expected=createHash('sha256');try{for(let offset=0;offset<size;offset+=block.length){const data=block.subarray(0,Math.min(block.length,size-offset));await file.write(data);expected.update(data)}await file.sync()}finally{await file.close()}const sha256=expected.digest('hex');
+ fixture=spawn(python,['-u','scripts/file-transfer-browser-fixture.py','--root',path.join(root,'received')],{windowsHide:true,stdio:['ignore','pipe','pipe']});let fixtureError='';fixture.stderr.on('data',b=>fixtureError=(fixtureError+b).slice(-4000));
+ port=await new Promise((resolve,reject)=>{let output='';const timer=setTimeout(()=>reject(new Error('fixture readiness timeout '+fixtureError)),20000);fixture.stdout.on('data',b=>{output+=b;const line=output.split('\n').find(x=>x.startsWith('{'));if(line){clearTimeout(timer);resolve(JSON.parse(line).port)}});fixture.once('error',reject);fixture.once('exit',code=>{if(!port){clearTimeout(timer);reject(new Error('fixture exit '+code+' '+fixtureError))}})});
+ browser=spawn(browserPath,['--headless=new','--disable-gpu','--remote-debugging-port=0','--remote-debugging-address=127.0.0.1','--user-data-dir='+path.join(root,'profile'),'--no-first-run','--no-default-browser-check','--disable-extensions','--disable-background-networking','--disable-component-update','--disable-sync','--no-proxy-server','about:blank'],{windowsHide:true,stdio:['ignore','ignore','pipe']});
+ const endpoint=await new Promise((resolve,reject)=>{let output='';const timer=setTimeout(()=>reject(new Error('Chromium readiness timeout')),20000);browser.stderr.on('data',b=>{output=(output+b).slice(-8192);const match=/DevTools listening on (ws:\/\/[^\s]+)/.exec(output);if(match){clearTimeout(timer);resolve(match[1])}});browser.once('error',reject)});
+ socket=new WebSocket(endpoint);await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});socket.onmessage=e=>{const m=JSON.parse(e.data),entry=pending.get(m.id);if(entry){pending.delete(m.id);m.error?entry.reject(new Error(m.error.message)):entry.resolve(m.result)}};
+ const {targetId}=await call('Target.createTarget',{url:'about:blank'},null);({sessionId:session}=await call('Target.attachToTarget',{targetId,flatten:true},null));await call('Page.enable');await call('Runtime.enable');await call('Page.navigate',{url:'http://127.0.0.1:'+port+'/'});for(let i=0;i<100&&!await evaluate('!!window.client');i++)await sleep(50);assert(await evaluate('!!window.client'));
+ await evaluate('window.dropOnce=true');const {root:document}=await call('DOM.getDocument');const {nodeId}=await call('DOM.querySelector',{nodeId:document.nodeId,selector:'#pick'});const started=Date.now();await call('DOM.setFileInputFiles',{nodeId,files:[source]});let result;
+ for(let i=0;i<18000;i++){await sleep(100);result=await evaluate('({items:window.result,buffered:window.peakBuffered,outstanding:window.peakOutstanding,reconnects:window.reconnects})');if(result.items?.[0]?.status==='complete')break;if(['failed','cancel_pending'].includes(result.items?.[0]?.status))throw new Error(JSON.stringify(result));if(i%300===0)console.log(JSON.stringify({elapsedSeconds:Math.round((Date.now()-started)/1000),received:result.items?.[0]?.committed,status:result.items?.[0]?.status}))}
+ assert.equal(result.items?.[0]?.status,'complete');const panel=await evaluate("({visible:!document.querySelector('#filesPanel').hidden,pathShown:document.querySelector('#filesPanel').textContent.includes(window.result[0].path),hashShown:document.querySelector('#filesPanel').textContent.includes('SHA-256'),progress:document.querySelector('#filesPanel progress').value})");assert(panel.visible&&panel.pathShown&&panel.hashShown);assert.equal(panel.progress,size||1);assert.equal(result.items[0].committed,size);assert.equal(result.reconnects,size>1048576?1:0);assert(result.buffered<=4194304&&result.outstanding<=4194304);const saved=result.items[0].path;assert.equal(path.resolve(saved),path.resolve(root,'received','no_extension'));assert.equal((await stat(saved)).size,size);assert.equal(await digest(saved),sha256);console.log(JSON.stringify({PASS:true,bytes:size,elapsedSeconds:(Date.now()-started)/1000,reconnects:result.reconnects,maxBrowserBufferedBytes:result.buffered,maxUnacknowledgedBytes:result.outstanding,receiverDiskReadbackSha256:true,independentNodeSha256:true,media:false,input:false,network:'same-machine loopback fixture; not cross-network'}));
+}finally{
+ if(socket?.readyState===1){try{await call('Browser.close',{},null)}catch{}socket.close()}if(browser&&browser.exitCode===null){await Promise.race([new Promise(r=>browser.once('exit',r)),sleep(5000)]);if(browser.exitCode===null)browser.kill()}
+ for(const entry of pending.values())entry.reject(new Error('test cleanup'));pending.clear();
+ if(port)await fetch('http://127.0.0.1:'+port+'/shutdown',{method:'POST',signal:AbortSignal.timeout(10000)}).catch(()=>{});
+ if(fixture&&fixture.exitCode===null){await Promise.race([new Promise(r=>fixture.once('exit',r)),sleep(15000)]);if(fixture.exitCode===null)fixture.kill()}
+ assert.equal(path.dirname(path.resolve(root)),path.resolve(base));await rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:200});console.log('Owned browser, fixture and D: artifacts cleaned');
+}

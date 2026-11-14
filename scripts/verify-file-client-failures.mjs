@@ -1,0 +1,16 @@
+// Deterministic client state regressions. RPC/channel/clock are doubles here.
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {FileTransferClient} from '../web/file-transfer.mjs';
+const empty=createHash('sha256').digest('hex');
+class Double extends FileTransferClient{
+ constructor({cancelFirst=false,failOnce=false}={}){super({storage:null});Object.assign(this,{cancelFirst,failOnce,begins:0,finished:0,maxFile:128*1024**3});this.received=new Map();this.channel={readyState:'open',bufferedAmount:0,send:packet=>{if(typeof packet==='string')return;const view=new DataView(packet.buffer),id=Array.from(packet.subarray(4,20),v=>v.toString(16).padStart(2,'0')).join('');const entry=this.tasks.find(t=>t.id===id);const offset=Number(view.getBigUint64(20));assert.equal(offset,this.received.get(id)||0);this.received.set(id,offset+packet.length-28);if(this.cancelFirst&&entry===this.tasks[0]){if(offset>=3*1024*1024)queueMicrotask(()=>this.cancel(entry))}else queueMicrotask(()=>this.apply(entry,{committed:this.received.get(id),status:'receiving'}))}}}
+ async connect(){}
+ async rpc(e){if(e.type==='begin'){const id=(++this.begins).toString(16).padStart(32,'0');this.received.set(id,0);return{id,token:'s'.repeat(43),committed:0,status:'receiving',prefixSha256:empty}}if(e.type==='cancel')return{id:e.id,committed:0,status:'cancelled'};if(e.type==='finish'){if(this.failOnce&&!this.finished++)throw Object.assign(new Error('synthetic hash failure'),{permanent:true,code:'checksum_failed'});return{id:e.id,status:'complete',committed:this.received.get(e.id),sha256:e.sha256,path:'D:\\DIANNOW\\Received\\synthetic'}}throw new Error('Unexpected RPC '+e.type)}
+}
+async function settled(client){for(let i=0;i<500&&client.running;i++)await new Promise(r=>setTimeout(r,5));assert(!client.running,'client task did not settle')}
+const cancel=new Double({cancelFirst:true});cancel.add([new File([new Uint8Array(6*1024**2)],'cancel'),new File(['next file'],'next')]);await settled(cancel);assert.equal(cancel.tasks[0].status,'cancelled');assert.equal(cancel.tasks[1].status,'complete');assert.equal(cancel.tasks[0].sent,cancel.tasks[0].committed);
+const failure=new Double({failOnce:true});failure.add([new File(['abc'],'retry')]);await settled(failure);assert.equal(failure.tasks[0].status,'failed');assert.equal(failure.tasks[0].id,undefined);failure.retry(failure.tasks[0]);await settled(failure);assert.equal(failure.tasks[0].status,'complete');assert.equal(failure.begins,2);
+let peerCreated=false;const unsupported=new FileTransferClient({supported:()=>false,storage:null,Peer:class{constructor(){peerCreated=true}}});unsupported.add([new File(['a'],'file')]);await settled(unsupported);assert(!peerCreated);assert.equal(unsupported.tasks[0].status,'failed');
+const clock=Date.now;let now=0,pings=0;try{Date.now=()=>now;const prefix=new FileTransferClient({storage:null});prefix.channel={send:value=>{if(JSON.parse(value).type==='ping')pings++}};const task={file:{slice:(start,end)=>({arrayBuffer:async()=>{now+=15000;return new Uint8Array(end-start).buffer}})},cancel:false};await prefix.prefix(task,122880,0);assert.equal(pings,2)}finally{Date.now=clock}
+console.log('PASS cancel-at-full-window then next file; terminal failure starts new upload; legacy backend blocked before peer; long-prefix keepalive (doubles)');

@@ -328,7 +328,7 @@ console.log('Full Windows keyboard includes letters, numbers, punctuation, Caps 
 }
 
 {
- const updates=await start(true);updates.setServerBuild(23);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=23/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
+ const updates=await start(true);updates.setServerBuild(25);updates.nodes.typing.value='unsent draft';await updates.intervals[1]();assert.equal(updates.navigations.length,0);updates.nodes.typing.value='';await updates.intervals[1]();assert.equal(updates.navigations.length,1);assert.match(updates.navigations[0],/_release=25/);await updates.intervals[1]();assert.equal(updates.navigations.length,1);console.log('Verified automatic release reload, cache bypass and unsent draft protection.');
 }
 
 const pointer=(overrides={})=>({pointerId:77,pointerType:'touch',clientX:100,clientY:100,button:0,preventDefault(){},...overrides});
@@ -606,10 +606,10 @@ console.log('Verified same-endpoint UDP-first browser candidates, IPv6/plain/TLS
 }
 
 {
- const pages=await start(true,scripts,async(path)=>path.endsWith('/version.json')?{ok:true,json:async()=>({build:23})}:{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})},undefined,19,undefined,false,undefined,'tycofficial.github.io');
+ const pages=await start(true,scripts,async(path)=>path.endsWith('/version.json')?{ok:true,json:async()=>({build:25})}:{ok:true,status:200,json:async()=>({type:'answer',sdp:'answer-sdp'})},undefined,19,undefined,false,undefined,'tycofficial.github.io');
  assert(pages.requests.some(request=>request.path.endsWith('/version.json')));
  assert.equal(pages.navigations.length,1,'GitHub Pages must see its own build even when the signaling Site reports an older version');
- assert.match(pages.navigations[0],/_release=23/);
+ assert.match(pages.navigations[0],/_release=25/);
  console.log('Verified GitHub Pages release checking independent of the signaling Site version.');
 }
 
