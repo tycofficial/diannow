@@ -2,55 +2,72 @@ param([Parameter(Mandatory=$true)][string]$SourceHost,[string]$BackupRoot='D:\DI
 $ErrorActionPreference='Stop'
 $principal=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
- throw 'Runtime update requires an administrator terminal. No UAC window or configuration changes were started.'
+ throw 'Runtime update requires an administrator terminal. No UAC, backend operation or permission changes were started.'
 }
+Import-Module (Join-Path $PSScriptRoot 'runtime-update.psm1') -Force
 $installDir=Join-Path $env:ProgramFiles 'DiannaoRemoteDesktop'
 $installedExe=Join-Path $installDir 'RemoteDesktop.exe'
 $stateDir=Join-Path $env:LOCALAPPDATA 'CodexDesktopViewer\desktop-service'
-$source=(Resolve-Path -LiteralPath $SourceHost).Path
-if(-not(Test-Path -LiteralPath $installedExe) -or -not(Test-Path -LiteralPath (Join-Path $source 'RemoteDesktop.exe'))){throw 'Existing installation or built runtime is missing.'}
-if(-not(Get-ScheduledTask -TaskName CodexDesktopViewer -ErrorAction SilentlyContinue)){throw 'Existing scheduled task is required; runtime update does not register tasks.'}
-foreach($root in @($source,$installDir)){
- foreach($item in @((Get-Item -LiteralPath $root)) + @(Get-ChildItem -LiteralPath $root -Recurse -Force)){
-  if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Unexpected reparse point in runtime path.'}
- }
+$taskName='CodexDesktopViewer'
+if(-not(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){throw 'Existing scheduled task is required; update does not register tasks.'}
+
+function Get-OwnedRuntimeProcesses {
+ return @(Get-Process -Name RemoteDesktop -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $installedExe})
 }
-$directoryAcl=Get-Acl -LiteralPath $installDir
-$fileAcl=Get-Acl -LiteralPath $installedExe
-$backup=Join-Path $BackupRoot ('runtime-'+(Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
-New-Item -ItemType Directory -Path $backup -ErrorAction Stop | Out-Null
-Copy-Item -LiteralPath $installDir -Destination (Join-Path $backup 'previous-host') -Recurse
-# Preserve DPAPI files, scheduled-task definition, drivers, firewall and proxies.
-New-Item -ItemType File -Path (Join-Path $stateDir 'stop.request') -Force | Out-Null
-$deadline=(Get-Date).AddSeconds(25)
-do{
- $owned=@(Get-Process -Name RemoteDesktop -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $installedExe})
- if(-not $owned.Count){break}
- Start-Sleep -Milliseconds 250
-}while((Get-Date) -lt $deadline)
-if($owned.Count){throw 'Existing backend did not stop gracefully. Files were not replaced; backup is retained.'}
+function Wait-RuntimeStopped {
+ $deadline=(Get-Date).AddSeconds(40)
+ do{
+  if(-not (Get-OwnedRuntimeProcesses).Count -and (Get-ScheduledTask -TaskName $taskName).State -ne 'Running'){return $true}
+  Start-Sleep -Milliseconds 250
+ }while((Get-Date) -lt $deadline)
+ return $false
+}
+function Test-RuntimeHealth([datetime]$Since) {
+ try{
+  $status=Get-Content -LiteralPath (Join-Path $stateDir 'host-status.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+  $epoch=[datetime]'1970-01-01T00:00:00Z'
+  if(-not $status.running -or [double]$status.updated -lt ($Since.ToUniversalTime()-$epoch.ToUniversalTime()).TotalSeconds){return $false}
+  if((Get-Date).ToUniversalTime().Subtract($epoch.ToUniversalTime().AddSeconds([double]$status.updated)).TotalSeconds -gt 5){return $false}
+  $hostProcess=Get-Process -Id $status.hostPid -ErrorAction Stop
+  $engineProcess=Get-Process -Id $status.enginePid -ErrorAction Stop
+  return $hostProcess.Path -eq $installedExe -and $engineProcess.Path -eq $installedExe -and (Get-ScheduledTask -TaskName $taskName).State -eq 'Running'
+ }catch{return $false}
+}
+function Start-AndCheckRuntime {
+ # Wait for a draining task; never force-kill a production process or assume
+ # Start-ScheduledTask restarts a still-running task.
+ $attempt=Get-Date;$deadline=$attempt.AddSeconds(45);$launched=$false
+ do{
+  if((Get-ScheduledTask -TaskName $taskName).State -ne 'Running' -and -not $launched){Start-ScheduledTask -TaskName $taskName;$launched=$true}
+  if(Test-RuntimeHealth $attempt){return $true}
+  Start-Sleep -Milliseconds 250
+ }while((Get-Date) -lt $deadline)
+ return $false
+}
+function Test-FrozenFileRuntime([string]$Report) {
+ $probe=Start-Process -FilePath $installedExe -ArgumentList @('--file-self-test',('"'+$Report+'"')) -WindowStyle Hidden -PassThru
+ try{
+  if(-not $probe.WaitForExit(30000)){
+   # Only the owned, device-free smoke process is eligible for termination.
+   if(-not $probe.HasExited){$probe.Kill();[void]$probe.WaitForExit(5000)}
+   return $false
+  }
+  if($probe.ExitCode -ne 0 -or -not(Test-Path -LiteralPath $Report)){return $false}
+  $health=Get-Content -LiteralPath $Report -Raw -Encoding UTF8 | ConvertFrom-Json
+  return $health.ok -and $health.frozen -and $health.fileProtocol -eq 1
+ }finally{$probe.Dispose()}
+}
+$mutex=[Threading.Mutex]::new($false,'Global\DiannowRuntimeUpdate');$claimed=$false
 try{
- Copy-Item -Path (Join-Path $source '*') -Destination $installDir -Recurse -Force
- # New runtime files receive exactly the installation's existing access policy.
- foreach($item in Get-ChildItem -LiteralPath $installDir -Recurse -Force){Set-Acl -LiteralPath $item.FullName -AclObject $(if($item.PSIsContainer){$directoryAcl}else{$fileAcl})}
- $expected=(Get-FileHash -LiteralPath (Join-Path $source 'RemoteDesktop.exe') -Algorithm SHA256).Hash
- $actual=(Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash
- if($actual -ne $expected){throw 'Installed EXE hash does not match reviewed build.'}
- $checked=0
- foreach($file in Get-ChildItem -LiteralPath $source -File -Recurse){
-  $relative=$file.FullName.Substring($source.Length).TrimStart([IO.Path]::DirectorySeparatorChar)
-  $target=Join-Path $installDir $relative
-  if((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash){throw ('Runtime file hash mismatch: '+$relative)}
-  $checked++
+ try{$claimed=$mutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$claimed=$true;throw 'Previous updater ended unexpectedly; inspect its retained journal before retrying.'}
+ if(-not $claimed){throw 'Another runtime update is already active.'}
+ $hooks=@{
+  IsRunning={return (Get-OwnedRuntimeProcesses).Count -gt 0}
+  Stop={return Wait-RuntimeStopped}
+  StartAndCheck={return Start-AndCheckRuntime}
+  Smoke={param($report) return Test-FrozenFileRuntime $report}
  }
- $selfTest=Join-Path $backup 'file-runtime-self-test.json'
- $probe=Start-Process -FilePath $installedExe -ArgumentList @('--file-self-test',('"'+$selfTest+'"')) -WindowStyle Hidden -Wait -PassThru
- if($probe.ExitCode -ne 0 -or -not(Test-Path -LiteralPath $selfTest)){throw 'Frozen file runtime self-test failed.'}
- $health=Get-Content -LiteralPath $selfTest -Raw | ConvertFrom-Json
- if(-not $health.ok -or -not $health.frozen -or $health.fileProtocol -ne 1){throw 'Installed file runtime version is incompatible.'}
- Start-ScheduledTask -TaskName CodexDesktopViewer
- @{ok=$true;installed=$installedExe;sha256=$actual;verifiedFiles=$checked;backup=$backup;runtimeOnly=$true;networkChanged=$false;credentialsChanged=$false} | ConvertTo-Json
-}catch{
- Write-Error ('Runtime update failed; retained backup: '+$backup+'; '+$_.Exception.Message)
- throw
-}
+ $result=Invoke-RuntimeUpdate -SourceRoot $SourceHost -InstallRoot $installDir -StateDirectory $stateDir -BackupRoot $BackupRoot -Hooks $hooks
+ $result | ConvertTo-Json -Depth 6
+ if(-not $result.ok){throw ('Runtime update failed at '+$result.phase+'. '+$result.error+' Rollback: '+$result.rollbackError+' Backup: '+$result.backup)}
+}finally{if($claimed){$mutex.ReleaseMutex()};$mutex.Dispose()}
