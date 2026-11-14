@@ -1,6 +1,10 @@
 ﻿param([switch]$RuntimeOnly)
 $ErrorActionPreference = 'Stop'
 $project = Split-Path $PSScriptRoot -Parent
+if($RuntimeOnly){
+ & (Join-Path $PSScriptRoot 'update-desktop-runtime.ps1') -SourceHost (Join-Path $project 'outputs\host\RemoteDesktop')
+ exit
+}
 $principal=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
     $arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$PSCommandPath+'"'+$(if($RuntimeOnly){' -RuntimeOnly'}else{''})

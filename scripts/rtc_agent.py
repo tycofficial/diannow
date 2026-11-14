@@ -454,7 +454,7 @@ class DesktopSession:
                'microphoneError':getattr(self.mic_sink,'error',None),
                'audioIndependent':bool(self.audio_track and self.audio_track.independent and self.owner.audio_router.ready),
                'audioRouteError':self.owner.audio_router.error,
-               'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],
+               'fileProtocol':1,'inputFeatures':['keyState','nativeTouch','relativePointer','cooperativeViewers'],
                'microphoneReady':bool(self.mic_sink and self.mic_sink.device and self.owner.audio_router.microphone_ready)}
         if event.get('diagnostics') is True:
             value.update(videoDiagnostics=self.video_diagnostics(),display={**self.owner.display,**value['display']},displays=displays(),
@@ -622,6 +622,8 @@ class DesktopSession:
             if transceiver.kind=='video':transceiver.setCodecPreferences(video_codec_preferences())
         @pc.on('datachannel')
         def on_channel(channel):
+            if channel.label not in ('input','pointer','state'):
+                channel.close();return
             loop=asyncio.get_running_loop()
             def input_result(identifier,error):
                 def reply():
@@ -746,6 +748,9 @@ class DesktopSession:
 
 class DesktopAgent:
     def __init__(self):
+        from file_transfer_rtc import FileTransferService
+        from file_transfer_progress import ProgressReporter
+        self.file_service=FileTransferService(notify=ProgressReporter())
         self.display,device_index,output_index=capture_target()
         print(json.dumps({'captureDisplay':self.display,'captureDevice':device_index,'captureOutput':output_index}),flush=True)
         async def refresh_displays():return await asyncio.to_thread(displays)
@@ -787,6 +792,8 @@ class DesktopAgent:
         if any(session.pc and session.pc.connectionState=='connected' for session in self.sessions):self.input.enabled=True
         else:self.input.disable()
     async def answer(self,offer,session_id=None):
+        if offer.get('purpose')=='file-transfer':
+            return await self.file_service.answer(offer,session_id or uuid.uuid4().hex,session_ice_servers(self,{}))
         for session in list(self.sessions):
             if session.expired() and not session.closed:
                 try:await asyncio.wait_for(session.close(),2)
@@ -809,6 +816,7 @@ class DesktopAgent:
             asyncio.create_task(session.close());raise
     async def close(self):
         self.closed=True
+        await self.file_service.close()
         for session in list(self.sessions):await session.close()
         await self.media_devices.close()
         await asyncio.to_thread(self.audio_router.close)

@@ -255,7 +255,13 @@ def show_window():
 
 def main():
     STATE_DIR.mkdir(parents=True,exist_ok=True)
+    if '--file-self-test' in sys.argv:
+        from file_transfer_progress import runtime_self_test
+        return runtime_self_test(sys.argv[sys.argv.index('--file-self-test')+1])
     if '--self-test' in sys.argv:return self_test(sys.argv[sys.argv.index('--self-test')+1])
+    if '--transfer-window' in sys.argv:
+        from file_transfer_progress import show_transfer_window
+        show_transfer_window();return 0
     if '--agent' in sys.argv:run_engine()
     elif '--background' in sys.argv:supervise()
     elif '--restart' in sys.argv:(STATE_DIR/'restart.request').touch()
